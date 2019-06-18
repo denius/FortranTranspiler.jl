@@ -25,6 +25,8 @@ function collect_arrays(code)
         # Skip comments
         r"\h*!.*" => s"",
         r"^\*.*$"m => s"",
+        r"^c.*$"m => s"",
+        r"^C.*$"m => s"",
         # Remove '&' / '.' multiline continuations
         #r"^\h*&\h*"m => " ",
         #r"^     \S\h*"m => " ",
@@ -79,6 +81,9 @@ end
 
 # Regex/substitution pairs for replace(). Order matters here.
 const replacements = OrderedDict(
+    # \r\n -> \n, \r -> \n
+    r"\r\n" => @s_str("\n"),
+    r"\r" => @s_str("\n"),
     # Lowercase everything not commented
     #r"^(?!.*!).*"m => lowercase,
     # Lowercase start of lines with comments
@@ -92,6 +97,8 @@ const replacements = OrderedDict(
     # Comments use # not ! or *
     "!" => "#",
     r"^\*"m => "#",
+    r"^c"m => "#",
+    r"^C"m => "#",
     #r"^#(\*+)"m => s"#",
     r"====" => s"----",
     r"-===$"m => s"----",
@@ -166,14 +173,17 @@ const replacements = OrderedDict(
     # Fix assignments
     r"(?<=[^\s=])=(?=[^\s=])" => " = ",
     # Add end after single line if with an = assignment
-    r"if\s*([\(].*?) = (.*?)(\s*#.*\n|\n)"i => s"if \1 = \2 end\3",
+    r"(?<=\s)if\s*([\(].*?) = (.*?)(\s*#.*\n|\n)"i => s"if \1 = \2 end\3",
     # Single-line IF statement with various terminations
-    r"if\s*(.*?)\s*return\s*(\n)"i => s"\1 && return\2",
-    r"if\s*(.*?)\s*cycle\s*(\n)"i => s"\1 && continue\2",
-    r"if\s*(.*?)\s*goto\s*(.*?)(\n)"i => s"\1 && @goto L\2\3",
+    r"(?<=\s)if\s*(.*?)\s*return\s*(\n)"i => s"\1 && return\2",
+    r"(?<=\s)if\s*(.*?)\s*cycle\s*(\n)"i => s"\1 && continue\2",
+    r"(?<=\s)if\s*(.*?)\s*goto\s*(.*?)(\n)"i => s"\1 && @goto L\2\3",
     # Remove expression's brackets after if/elseif/while
     r"^(\h*)(if|elseif|while)(\h+)\((.*)\)\h*$"m => s"\1\2\3\4",
     r"^(\h*)(if|elseif|while)(\h+)\((.*)\)(\h*#.*?)$"m => s"\1\2\3\4\5",
+    # Process PARAMETER
+    #r"(?<=parameter\h+\([^,]+),(?=[^,]+\))"i => s";",
+    r"^(\h*)parameter(\h+)\((.*)\)(\h*?#.*|\h*?)$"mi => s"\1\2\3\4",
     # Some specific functions
     r"\bsign\b\("i => "copysign(",
     r"(?<=\W)MAX\(" => "max(",
@@ -224,7 +234,7 @@ const removal = [
     r"\n\s*character[*].*"i,
     r"\n\s*external\s.*"i,
     r"\n\s*intrinsic\s.*"i,
-    r"\n\s*parameter\s.*"i,
+    #r"\n\s*parameter\s.*"i,
     # Import statements
     r"\n\s*use\s.*"i,
     r"\n\s*include\s.*"i,
