@@ -18,7 +18,7 @@ julia fortran-julia.jl filename.f90
 Output is written to filename.jl.
 =#
 
-using DataStructures
+using DataStructures, Printf
 
 function collect_arrays(code)
     replacements = OrderedDict(
@@ -39,6 +39,7 @@ function collect_arrays(code)
         r"^\h*integer\h+[^(]+\("mi,
         r"^\h*integer\*.\h+[^(]+\("mi,
         r"^\h*character\h+"mi,
+        r"^\h*character[*]"mi,
     ]
     for r in replacements
         len = length(code)
@@ -79,8 +80,47 @@ function collect_arrays(code)
 
 end
 
+function processselectcase(lines)
+    var = ""
+    case1 = false
+    for i = 1:length(lines)
+        if occursin(r"select\h+case"i, lines[i])
+            expr = replace(lines[i], r"^\h*select\h+case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
+            var = @sprintf "EX%s" mod(hash("$(expr)"), 2^16)
+            lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SubstitutionString("\\1"*var*" = "*expr*" #\\2") )
+            case1 = true
+        end
+        if !isempty(var) && occursin(r"^\h*case\h*\("mi, lines[i])
+            exprs = replace(lines[i], r"^\h*case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
+            if occursin(',', exprs)
+                exprs = replace(exprs, r"(\h*,\h*)" => SubstitutionString(" || "*var*" == "))
+            end
+            exprs = "if $(var) == " * exprs
+            if !case1 exprs = "else" * exprs end
+            lines[i] = replace(lines[i], r"^(\h*)case\h*\(.*\)(\h*#.*|\h*)$"mi => SubstitutionString("\\1"*exprs*"\\2"))
+            case1 = false
+        elseif !isempty(var) && occursin(r"^\h*case\h+default"mi, lines[i])
+            lines[i] = replace(lines[i], r"^(\h*)case\h+default(\h*#.*|\h*)$"mi => s"\1else\2")
+            var = ""
+        elseif !isempty(var) && occursin(r"^\h*end\h+select"mi, lines[i])
+            var = ""
+        end
+    end
+    return lines
+end
+
+function processparameters(lines)
+    for i = 1:length(lines)
+        if occursin(r"^\h*parameter\h+\("mi, lines[i]) ||
+           occursin(r"\h*[^,#]+\h*,\h*parameter\h*::\h*"mi, lines[i])
+            lines[i] = replace(lines[i], r"," => s";")
+        end
+    end
+    return lines
+end
+
 # Regex/substitution pairs for replace(). Order matters here.
-const replacements = OrderedDict(
+const multilinereplacements = OrderedDict(
     # \r\n -> \n, \r -> \n
     r"\r\n" => @s_str("\n"),
     r"\r" => @s_str("\n"),
@@ -94,6 +134,11 @@ const replacements = OrderedDict(
     #r"^     \S\h*"m => " ",
     ##r"(?<=#)\s*&\s*" => "",
     ##r"\n\s*\.\s*" => " ",
+    # Labels
+    r"^(\h*)(\d+)\h+(.*)$"m => @s_str("    @label L\\2\n\n    \\3"),
+)
+
+const replacements = OrderedDict(
     # Comments use # not ! or *
     "!" => "#",
     r"^\*"m => "#",
@@ -108,18 +153,19 @@ const replacements = OrderedDict(
     # Powers use ^ not **
     r"\*\*([^*\n]+)" => s"^\1",
     #r"\*\*" => "^",
+    # constant arrays
+    r"\(/" => s"[",
+    r"/\)" => s"]",
     # Escape quote "
     r"\"'" => "\\\"'",
     r"'\"" => "'\\\"",
     # Only double quotes allowed for strings
-    r"'([^'])'" => s"@\1@",
+    r"'([^',])'" => s"@\1@",
     "'" => "\"",
     r"@([^\\])@" => s"'\1'",
     r"@([\\])@" => "'\\\\'",
-    #r"'([^'][^'\n]+)'" => s"\"\1\"",
     # DO loop to for loop
-    r"do (.*),(.*)" => s"for \1:\2",
-    r"DO (.*),(.*)" => s"for \1:\2",
+    r"do (.*),(.*)"i => s"for \1:\2",
     # Spaces around math operators
     #r"([\*\+\/=])(?=\S)" => s"\1 ",
     #r"(?<=\S)([\*\+\/=])" => s" \1",
@@ -129,23 +175,26 @@ const replacements = OrderedDict(
     # Space after commas in expressions
     r"(,)([^\s,\[\]\(\)]+\])" => s"@\2",
     r"(,)(\S)" => s"\1 \2",
-    r"@" => ",",
-    # Replace RETURN with return
-    r"(\s+)RETURN" => s"\1return",
+    #r"@" => ",",
+    r"@(?!label)" => ",",
+    # Replace XXXXXX with xxxxxx
+    r"(\s*)RETURN" => s"\1return",
+    # include
+    r"^(\s*)include\h+\"(.*)([.][^.]+)\"(\h*#.*|\h*)$"mi => s"\1include(\"\2.jl\")\4",
     # Replace do while -> while
     r"do\h+while"i => s"while",
     # Replace ELSEIF/ELSE IF with elseif 
-    r"(\s+)else\s*if"i => s"\1elseif",
+    r"^(\s*)else\s*if"mi => s"\1elseif",
     # Replace IF followed by ( to if (
-    r"(\s+)(elseif|if)\("i => s"\1\2 (",
+    r"^(\s*)(elseif|if)\("mi => s"\1\2 (",
     # Remove THEN
-    r"([)\s])then(\s+)"i => s"\1\2",
+    r"([)\s])then(\s*)"i => s"\1\2",
     # Replace IF with if
-    r"(\s+)IF(?=\W)" => s"\1if",
+    r"^(\s*)IF(?=\W)"m => s"\1if",
     # Replace ELSE with else
-    r"(\s+)ELSE(?=\W)" => s"\1else",
+    r"^(\s*)ELSE(?=\W)"m => s"\1else",
     # Relace END XXXX with end
-    r"^(\h+)end\h*?\w*?(\h*#.*|\h*)$"mi => s"\1end\2",
+    r"^(\h*)end\h*?\w*?(\h*#.*|\h*)$"mi => s"\1end\2",
     # Replace expnent function
     r"(\W)exp\("i => s"\1exp(",
     # Don't need CALL
@@ -173,17 +222,18 @@ const replacements = OrderedDict(
     # Fix assignments
     r"(?<=[^\s=])=(?=[^\s=])" => " = ",
     # Add end after single line if with an = assignment
-    r"(?<=\s)if\s*([\(].*?) = (.*?)(\s*#.*\n|\n)"i => s"if \1 = \2 end\3",
+    r"(?<=\s)if\s*([\(].*?) = (.*?)(\s*#.*|)$"mi => s"if \1 = \2 end\3",
     # Single-line IF statement with various terminations
-    r"(?<=\s)if\s*(.*?)\s*return\s*(\n)"i => s"\1 && return\2",
-    r"(?<=\s)if\s*(.*?)\s*cycle\s*(\n)"i => s"\1 && continue\2",
-    r"(?<=\s)if\s*(.*?)\s*goto\s*(.*?)(\n)"i => s"\1 && @goto L\2\3",
+    #r"(?<=\s)if\s*(.*?)\s*return\s*"i => s"\1 && return\2",
+    r"(^\h*)if\s*(.*?)\s*return(\s*#.*|\s*)$"mi => s"\1\2 && return\3",
+    r"(^\h*)if\s*(.*?)\s*cycle(\s*#.*|\s*)$"mi => s"\1\2 && continue\3",
+    r"(^\h*)if\s*(.*?)\s*goto\s*(.*)"i => s"\1\2 && @goto L\3",
     # Remove expression's brackets after if/elseif/while
-    r"^(\h*)(if|elseif|while)(\h+)\((.*)\)\h*$"m => s"\1\2\3\4",
-    r"^(\h*)(if|elseif|while)(\h+)\((.*)\)(\h*#.*?)$"m => s"\1\2\3\4\5",
+    r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)\h*$"m => s"\1\2\3\4",
+    r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)(\h*#.*)$"m => s"\1\2\3\4\5",
     # Process PARAMETER
-    #r"(?<=parameter\h+\([^,]+),(?=[^,]+\))"i => s";",
     r"^(\h*)parameter(\h+)\((.*)\)(\h*?#.*|\h*?)$"mi => s"\1\2\3\4",
+    r"^(\h*).*;\h*parameter\h*::\h*(.*)(\h*?#.*|\h*?)$"mi => s"\1\2\3",
     # Some specific functions
     r"\bsign\b\("i => "copysign(",
     r"(?<=\W)MAX\(" => "max(",
@@ -194,8 +244,6 @@ const replacements = OrderedDict(
     r"(\W\d+)\.(\D)" => s"\1.0\2",
     # Goto
     r"^(\s*)goto\s+(\d+)"mi => s"\1@goto L\2",
-    # Labels
-    r"^(\h*)(\d+)\h+(.*)$"m => @s_str("    @label L\\2\n\n    \\3"),
     # Tab to 4 spaces
     r"\t" => "    ",
     # Relace suberror with error and mark for fixup
@@ -237,7 +285,6 @@ const removal = [
     #r"\n\s*parameter\s.*"i,
     # Import statements
     r"\n\s*use\s.*"i,
-    r"\n\s*include\s.*"i,
 ]
 
 function main()
@@ -246,6 +293,14 @@ function main()
     filename = string(ARGS[1])
     f = open(filename)
     code = read(f, String)
+
+    # process includes
+    #includes = r"^\h*include\h+'([^']+)'(\h*!.*|\h*)$"mi
+    #for m in collect(eachmatch(includes, code))
+    #    file2include = dirname(filename) * m.captures[1]
+    #    code2include = read(open(file2include), String)
+    #    code = replace(code,  includes => SubstitutionString(code2include), count=1)
+    #end
 
     # replace with square braces for arrays
     braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
@@ -261,11 +316,26 @@ function main()
         end
     end
 
-    # Process replacements and removals.
-    for r in replacements
+    # Process multiline replacements.
+    for r in multilinereplacements
         code = replace(code, r)
     end
 
+    # split string on vector of string lines and process each separately
+    lines = split(code, '\n')
+    lines = processselectcase(lines)
+    lines = processparameters(lines)
+    for r in replacements
+        for i = 1:length(lines)
+            #@show lines[i], r
+            lines[i] = replace(lines[i], r)
+        end
+    end
+
+
+    # concate string lines back together and
+    # create functions declaration with custom header
+    code = foldl((a,b) -> a*'\n'*b, lines)
     for r in headersprocessing
         len = length(code)
         while true
@@ -283,6 +353,8 @@ function main()
     # TODO
     # CHARACTER *NN
     # PARAMETER
+    # SWITCH CASE: Done
+    # include
     # write(*,*)
     # write(*,*) && STOP
     # INPUT:
