@@ -1,4 +1,8 @@
-#!/usr/bin/env julia
+#!/bin/bash
+#=
+exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
+    "${BASH_SOURCE[0]}" "$@"
+=#
 
 #=
 This julia script converts fortran 90 code into julia.
@@ -20,18 +24,95 @@ Output is written to filename.jl.
 
 using DataStructures, Printf
 
-function collect_arrays(code)
+function stripfortrancomments(code)
+    dlms = [
+        r"^\*"m,
+        r"^c"mi,
+        "!" # there is will be wrong case on escaped "!"
+    ]
+    if code isa AbstractVector
+        lines = deepcopy(code)
+    else
+        lines = split(code, '\n')
+    end
+    for i = 1:length(lines)
+        for dlm in dlms
+            lines[i] = split(lines[i], dlm, limit=2, keepempty=true)[1]
+        end
+        lines[i] = rstrip(lines[i])
+    end
+    if ! code isa AbstractVector
+        lines = foldl((a,b) -> a*'\n'*b, lines)
+    end
+    return lines
+end
+
+function splitonfortrancomment(lines)
+    dlms = [
+        r"^\*"m,
+        r"^c"mi,
+        #r"^C"m,
+        "!" # there is will be wrong case on escaped "!"
+    ]
+    code = deepcopy(lines)
+    comments  = ["" for i=1:length(lines)]
+    for i = 1:length(code)
+        for dlm in dlms
+            if length(code[i]) > 0
+                r = split(code[i], dlm, limit=2, keepempty=true)
+                code[i] = r[1]
+                length(r) > 1 && (comments[i] = r[2] * comments[i])
+            end
+        end
+    end
+    for i = 1:length(code)
+        comments[i] = "#" * comments[i]
+    end
+    # absorb tail spaces to comment
+    for i = 1:length(code)
+        r = collect(eachmatch(r"\h+$", code[i]))
+        if length(r) > 0
+            code[i] = replace(code[i], r"\h+$" => "")
+            comments[i] = r[1].match * comments[i]
+        end
+    end
+    return code, comments
+end
+
+function expandlinecontinuation(code)
+    replacements = OrderedDict(
+        # fixed-form startline continuations
+        r"\n     [.+&$]" => "",
+        # free-form continuations
+        r"&\n"           => ""
+    )
+    code1 = deepcopy(code)
+    for r in replacements
+        code1 = replace(code1, r)
+    end
+    return code1
+end
+
+function splitonlines(code)
+    return split(code, '\n')
+end
+
+function collectarrays(code)
+    lines = stripfortrancomments(code)
+    lines = expandlinecontinuation(lines)
+    lines = splitonlines(lines)
+
     replacements = OrderedDict(
         # Skip comments
-        r"\h*!.*" => s"",
         r"^\*.*$"m => s"",
         r"^c.*$"m => s"",
         r"^C.*$"m => s"",
+        r"\h*!.*" => s"",
         # Remove '&' / '.' multiline continuations
         #r"^\h*&\h*"m => " ",
         #r"^     \S\h*"m => " ",
         ##r"^\h*\S\h*"m => " ",
-        r"\n\h*[.+&$]\h*" => " ",
+        r"\n\h*[.+&$]\h*" => " "
     )
     matches = [
         # Match declarations
@@ -119,6 +200,12 @@ function processparameters(lines)
     return lines
 end
 
+const newlinereplacements = OrderedDict(
+    # \r\n -> \n, \r -> \n
+    r"\r\n" => @s_str("\n"),
+    r"\r" => @s_str("\n")
+)
+
 # Regex/substitution pairs for replace(). Order matters here.
 const multilinereplacements = OrderedDict(
     # \r\n -> \n, \r -> \n
@@ -129,30 +216,33 @@ const multilinereplacements = OrderedDict(
     # Lowercase start of lines with comments
     #r"^.*!"m => lowercase,
     # Remove '&' / '.' multiline continuations
-    r"\n\h*[.+&$]\h*" => " ",
-    #r"^\h*&\h*"m => " ",
-    #r"^     \S\h*"m => " ",
-    ##r"(?<=#)\s*&\s*" => "",
-    ##r"\n\s*\.\s*" => " ",
+    r"^     [.+&$]" => "      ",
+    #r"\n\h*[.+&$]\h*" => " ",
+    ##r"^\h*&\h*"m => " ",
+    ##r"^     \S\h*"m => " ",
+    ###r"(?<=#)\s*&\s*" => "",
+    ###r"\n\s*\.\s*" => " ",
     # Labels
     r"^(\h*)(\d+)\h+(.*)$"m => @s_str("    @label L\\2\n\n    \\3"),
 )
 
 const replacements = OrderedDict(
-    # Comments use # not ! or *
-    "!" => "#",
-    r"^\*"m => "#",
-    r"^c"m => "#",
-    r"^C"m => "#",
-    #r"^#(\*+)"m => s"#",
-    r"====" => s"----",
-    r"-===$"m => s"----",
-    r"--==$"m => s"----",
-    r"---=$"m => s"----",
-    r"^#(=+)"m => s"#",
+    # Remove '&' / '.' multiline continuations
+    r"^     [.+&$]" => "      ",
+    ## Comments use # not ! or *
+    #"!" => "#",
+    #r"^\*"m => "#",
+    #r"^c"m => "#",
+    #r"^C"m => "#",
+    ##r"^#(\*+)"m => s"#",
+    #r"====" => s"----",
+    #r"-===$"m => s"----",
+    #r"--==$"m => s"----",
+    #r"---=$"m => s"----",
+    #r"^#(=+)"m => s"#",
     # Powers use ^ not **
-    r"\*\*([^*\n]+)" => s"^\1",
-    #r"\*\*" => "^",
+    #r"\*\*([^*\n]+)" => s"^\1",
+    r"\*\*" => "^",
     # constant arrays
     r"\(/" => s"[",
     r"/\)" => s"]",
@@ -270,8 +360,8 @@ const headersprocessing = OrderedDict(
 
 # Patterns to remove
 const removal = [
-    # Trailing whitespace
-    r"\h*$"m,
+    ## Trailing whitespace
+    #r"\h*$"m,
     # Variable declarations
     r"\n\s*real\s.*"i,
     r"\n\s*real, external\s.*"i,
@@ -294,6 +384,11 @@ function main()
     f = open(filename)
     code = read(f, String)
 
+    # Process newlines.
+    for r in newlinereplacements
+        code = replace(code, r)
+    end
+
     # process includes
     #includes = r"^\h*include\h+'([^']+)'(\h*!.*|\h*)$"mi
     #for m in collect(eachmatch(includes, code))
@@ -302,10 +397,12 @@ function main()
     #    code = replace(code,  includes => SubstitutionString(code2include), count=1)
     #end
 
-    # replace with square braces for arrays
+    # replace array's brackets with square braces
     braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
     sqbraces = SubstitutionString("[\\1]")
-    arrays = collect_arrays(deepcopy(code))
+    #arrays = collectarrays(foldl((a,b) -> a*'\n'*b, splitonfortrancomment(split(code, '\n'))[1]))
+    #arrays = collectarrays(deepcopy(code))
+    arrays = collectarrays(code)
     for a in arrays
         w = Regex("\\b$(a)\\b") # whole word
         for m in collect(eachmatch(w, code))
@@ -321,8 +418,11 @@ function main()
         code = replace(code, r)
     end
 
-    # split string on vector of string lines and process each separately
+    # split string into vector of string lines and process each separately
     lines = split(code, '\n')
+    # split lines on comments
+    lines, comments = splitonfortrancomment(lines)
+
     lines = processselectcase(lines)
     lines = processparameters(lines)
     for r in replacements
@@ -367,6 +467,15 @@ function main()
     # XERBLA
     # DO NN I=
 
+    lines = split(code, '\n')
+    #@show lines
+    #@show comments
+    code = ""
+    for e in zip(lines, comments)
+        code = code * e[1] * "\n"
+        #code *= e[1] * e[2] * "\n"
+    end
+
     # Write the output to a .jl file with the same filename stem.
     stem = split(filename, ".")[1]
     outfile = stem * ".jl"
@@ -375,3 +484,4 @@ function main()
 end
 
 main()
+
