@@ -5,15 +5,9 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 =#
 
 #=
-This julia script converts fortran 90 code into julia.
+This julia script converts fortran 77, 90 code into julia.
 It uses naive regex replacements to do as much as possible,
 but the output WILL need further cleanup.
-
-Known conversion problems such as GOTO are commented and marked with FIXME
-
-Most variable declaration lines are entirely deleted, which may or
-may not be useful. 
-
 
 To run from a shell: 
 
@@ -30,18 +24,32 @@ function stripfortrancomments(code)
         r"^c"mi,
         "!" # there is will be wrong case on escaped "!"
     ]
-    if code isa AbstractVector
-        lines = deepcopy(code)
-    else
-        lines = split(code, '\n')
-    end
+    lines = splitonlines(code)
     for i = 1:length(lines)
         for dlm in dlms
             lines[i] = split(lines[i], dlm, limit=2, keepempty=true)[1]
         end
         lines[i] = rstrip(lines[i])
     end
-    if ! code isa AbstractVector
+    if !(code isa AbstractVector)
+        lines = foldl((a,b) -> a*'\n'*b, lines)
+    end
+    return lines
+end
+
+function markfortrancomments(code)
+    dlms = [
+        r"^\*"m,
+        r"^c"mi,
+        "!" # there is will be wrong case on escaped "!"
+    ]
+    lines = splitonlines(code)
+    for i = 1:length(lines)
+        for r in dlms
+            lines[i] = replace(lines[i], r => s"#", count=1)
+        end
+    end
+    if !(code isa AbstractVector)
         lines = foldl((a,b) -> a*'\n'*b, lines)
     end
     return lines
@@ -54,7 +62,7 @@ function splitonfortrancomment(lines)
         #r"^C"m,
         "!" # there is will be wrong case on escaped "!"
     ]
-    code = deepcopy(lines)
+    code = splitonlines(lines)
     comments  = ["" for i=1:length(lines)]
     for i = 1:length(code)
         for dlm in dlms
@@ -82,9 +90,9 @@ end
 function expandlinecontinuation(code)
     replacements = OrderedDict(
         # fixed-form startline continuations
-        r"\n     [.+&$]" => "",
+        r"\n     [.+&$]\h*" => " ",
         # free-form continuations
-        r"&\n"           => ""
+        r"&\n"           => " "
     )
     code1 = deepcopy(code)
     for r in replacements
@@ -94,74 +102,111 @@ function expandlinecontinuation(code)
 end
 
 function splitonlines(code)
-    return split(code, '\n')
+    if code isa AbstractVector
+        lines = deepcopy(code)
+    else
+        lines = split(code, '\n')
+    end
+    return lines
+end
+
+function printlines(list)
+    print("\n")
+    for (i,l) in enumerate(list) print("list[$i]:$l\n") end
 end
 
 function collectarrays(code)
     lines = stripfortrancomments(code)
     lines = expandlinecontinuation(lines)
-    lines = splitonlines(lines)
+    list = splitonlines(lines)
 
-    replacements = OrderedDict(
-        # Skip comments
-        r"^\*.*$"m => s"",
-        r"^c.*$"m => s"",
-        r"^C.*$"m => s"",
-        r"\h*!.*" => s"",
-        # Remove '&' / '.' multiline continuations
-        #r"^\h*&\h*"m => " ",
-        #r"^     \S\h*"m => " ",
-        ##r"^\h*\S\h*"m => " ",
-        r"\n\h*[.+&$]\h*" => " "
-    )
     matches = [
         # Match declarations
-        r"^\h*real\h+[^(]+\("mi,
-        r"^\h*integer\h+[^(]+\("mi,
-        r"^\h*integer\*.\h+[^(]+\("mi,
+        r"^\h*real\h+"mi,
+        r"^\h*real\*[0-9]+\h+"mi,
+        r"^\h*double\h+precision\h+"mi,
+        r"^\h*integer\h+"mi,
+        r"^\h*integer\*[0-9]+\h+"mi,
         r"^\h*character\h+"mi,
-        r"^\h*character[*]"mi,
+        r"^\h*character\*"mi
     ]
-    for r in replacements
-        len = length(code)
-        while true
-            code = replace(code, r)
-            len == length(code) && break
-            len = length(code)
-        end
-    end
-    list = split(code, "\n")
+
     matched = Vector{String}()
     for r in matches
-        #append!(matched, list[findall(i->occursin(r, i), list)])
         for i in list
             occursin(r, i) && push!(matched, strip(i))
         end
     end
-    # match only vars names
+    # match only arrays names
     for i in 1:length(matched)
-        matched[i] = replace(matched[i], r"^\S+\h+(.*)$"m => s"\1") # drop declaration
+        for r in matches
+            matched[i] = replace(matched[i], r => s"")               # drop declaration
+        end
         matched[i] = replace(matched[i], r" " => s"")               # drop spaces
         matched[i] = replace(matched[i], r"\([^)]+\)" => s"()")     # clean inside braces
         matched[i] = replace(matched[i], r"[^(),]+," => s"")        # drop non-arrays (without braces)
         matched[i] = replace(matched[i], r",[^(),]+$"m => s"")      # drop last non-array (without braces)
+        matched[i] = replace(matched[i], r"^[^(),]+$"m => s"")      # drop single non-array (without braces)
     end
     vars = Vector{String}()
     for i in 1:length(matched)
-        append!(vars, split(matched[i], ","))
+        length(matched[i]) > 0 && append!(vars, split(matched[i], ","))
     end
+    vars = unique(vars)
     for i in 1:length(vars)
         vars[i] = replace(vars[i], r" " => s"")
         vars[i] = replace(vars[i], r"^(\w+)\(.*\)$"m => s"\1")
     end
 
     @show vars
-
     return vars
 
 end
 
-function processselectcase(lines)
+function commentdeclarations(code)
+    lines = stripfortrancomments(code)
+    #lines = expandlinecontinuation(lines)
+    list = splitonlines(lines)
+
+    matches = [
+        # Match declarations
+        r"^\h*real\h+"mi,
+        r"^\h*real\*[0-9]+\h+"mi,
+        r"^\h*double\h+precision\h+"mi,
+        r"^\h*integer\h+"mi,
+        r"^\h*integer\*[0-9]+\h+"mi,
+        r"^\h*character\h+"mi,
+        r"^\h*character\*"mi
+    ]
+
+    marked = Set{Int}()
+    for r in matches
+        for (i,l) in enumerate(list)
+            occursin(r, l) && push!(marked, i)
+        end
+    end
+    # mark lines with continuations
+    marked2 = copy(marked)
+    for i in marked
+        while occursin(r",$", list[i]) || occursin(r"&$", list[i])
+            push!(marked2, i+=1)
+        end
+    end
+
+    list = splitonlines(code)
+    for i in marked2
+        list[i] = "#" * list[i]
+    end
+
+    if !(code isa AbstractVector)
+        list = foldl((a,b) -> a*'\n'*b, list)
+    end
+    return list
+
+end
+
+function processselectcase(code)
+    lines = splitonlines(code)
     var = ""
     case1 = false
     for i = 1:length(lines)
@@ -187,6 +232,9 @@ function processselectcase(lines)
             var = ""
         end
     end
+    if !(code isa AbstractVector)
+        lines = foldl((a,b) -> a*'\n'*b, lines)
+    end
     return lines
 end
 
@@ -208,20 +256,15 @@ const newlinereplacements = OrderedDict(
 
 # Regex/substitution pairs for replace(). Order matters here.
 const multilinereplacements = OrderedDict(
-    # \r\n -> \n, \r -> \n
-    r"\r\n" => @s_str("\n"),
-    r"\r" => @s_str("\n"),
-    # Lowercase everything not commented
-    #r"^(?!.*!).*"m => lowercase,
-    # Lowercase start of lines with comments
-    #r"^.*!"m => lowercase,
-    # Remove '&' / '.' multiline continuations
+    #### \r\n -> \n, \r -> \n
+    ###r"\r\n" => @s_str("\n"),
+    ###r"\r" => @s_str("\n"),
+    #### Lowercase everything not commented
+    ####r"^(?!.*!).*"m => lowercase,
+    #### Lowercase start of lines with comments
+    ####r"^.*!"m => lowercase,
+    # Remove '&' / '.' multiline continuations in fixed-form
     r"^     [.+&$]" => "      ",
-    #r"\n\h*[.+&$]\h*" => " ",
-    ##r"^\h*&\h*"m => " ",
-    ##r"^     \S\h*"m => " ",
-    ###r"(?<=#)\s*&\s*" => "",
-    ###r"\n\s*\.\s*" => " ",
     # Labels
     r"^(\h*)(\d+)\h+(.*)$"m => @s_str("    @label L\\2\n\n    \\3"),
 )
@@ -229,17 +272,6 @@ const multilinereplacements = OrderedDict(
 const replacements = OrderedDict(
     # Remove '&' / '.' multiline continuations
     r"^     [.+&$]" => "      ",
-    ## Comments use # not ! or *
-    #"!" => "#",
-    #r"^\*"m => "#",
-    #r"^c"m => "#",
-    #r"^C"m => "#",
-    ##r"^#(\*+)"m => s"#",
-    #r"====" => s"----",
-    #r"-===$"m => s"----",
-    #r"--==$"m => s"----",
-    #r"---=$"m => s"----",
-    #r"^#(=+)"m => s"#",
     # Powers use ^ not **
     #r"\*\*([^*\n]+)" => s"^\1",
     r"\*\*" => "^",
@@ -400,8 +432,6 @@ function main()
     # replace array's brackets with square braces
     braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
     sqbraces = SubstitutionString("[\\1]")
-    #arrays = collectarrays(foldl((a,b) -> a*'\n'*b, splitonfortrancomment(split(code, '\n'))[1]))
-    #arrays = collectarrays(deepcopy(code))
     arrays = collectarrays(code)
     for a in arrays
         w = Regex("\\b$(a)\\b") # whole word
@@ -413,17 +443,27 @@ function main()
         end
     end
 
-    # Process multiline replacements.
+    # comment out all vars declarations
+    code = commentdeclarations(code)
+
+    # process multiline replacements
     for r in multilinereplacements
         code = replace(code, r)
     end
 
+    # mark comments
+    code = markfortrancomments(code)
+
+    # select case
+    code = processselectcase(code)
+
     # split string into vector of string lines and process each separately
     lines = split(code, '\n')
     # split lines on comments
-    lines, comments = splitonfortrancomment(lines)
+    _, comments = splitonfortrancomment(lines)
 
-    lines = processselectcase(lines)
+    printlines(lines)
+
     lines = processparameters(lines)
     for r in replacements
         for i = 1:length(lines)
