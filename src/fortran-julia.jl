@@ -18,26 +18,7 @@ Output is written to filename.jl.
 
 using DataStructures, Printf
 
-function stripfortrancomments(code)
-    dlms = [
-        r"^\*"m,
-        r"^c"mi,
-        "!" # there is will be wrong case on escaped "!"
-    ]
-    lines = splitonlines(code)
-    for i = 1:length(lines)
-        for dlm in dlms
-            lines[i] = split(lines[i], dlm, limit=2, keepempty=true)[1]
-        end
-        lines[i] = rstrip(lines[i])
-    end
-    if !(code isa AbstractVector)
-        lines = foldl((a,b) -> a*'\n'*b, lines)
-    end
-    return lines
-end
-
-function markfortrancomments(code)
+function convertfortrancomments(code)
     dlms = [
         r"^\*"m,
         r"^c"mi,
@@ -55,15 +36,31 @@ function markfortrancomments(code)
     return lines
 end
 
+function stripcomments(code)
+    dlms = [
+        r"#"m
+    ]
+    lines = splitonlines(code)
+    for i = 1:length(lines)
+        for dlm in dlms
+            lines[i] = split(lines[i], dlm, limit=2, keepempty=true)[1]
+        end
+        lines[i] = rstrip(lines[i])
+    end
+    if !(code isa AbstractVector)
+        lines = foldl((a,b) -> a*'\n'*b, lines)
+    end
+    return lines
+end
+
 function splitonfortrancomment(lines)
     dlms = [
         r"^\*"m,
         r"^c"mi,
-        #r"^C"m,
         "!" # there is will be wrong case on escaped "!"
     ]
     code = splitonlines(lines)
-    comments  = ["" for i=1:length(lines)]
+    comments  = ["" for i=1:length(code)]
     for i = 1:length(code)
         for dlm in dlms
             if length(code[i]) > 0
@@ -74,7 +71,29 @@ function splitonfortrancomment(lines)
         end
     end
     for i = 1:length(code)
-        comments[i] = "#" * comments[i]
+        if length(comments[i]) > 0 comments[i] = "#" * comments[i] end
+    end
+    # absorb tail spaces to comment
+    for i = 1:length(code)
+        r = collect(eachmatch(r"\h+$", code[i]))
+        if length(r) > 0
+            code[i] = replace(code[i], r"\h+$" => "")
+            comments[i] = r[1].match * comments[i]
+        end
+    end
+    return code, comments
+end
+
+function splitoncomment(lines)
+    dlm = r"#"m
+    code = splitonlines(lines)
+    comments  = ["" for i=1:length(code)]
+    for i = 1:length(code)
+        if length(code[i]) > 0
+            r = split(code[i], dlm, limit=2, keepempty=true)
+            code[i] = r[1]
+            length(r) > 1 && (comments[i] = "#" * r[2])
+        end
     end
     # absorb tail spaces to comment
     for i = 1:length(code)
@@ -88,11 +107,10 @@ function splitonfortrancomment(lines)
 end
 
 function expandlinecontinuation(code)
+    # Note: trailing comment is not allowed here
     replacements = OrderedDict(
-        # fixed-form startline continuations
-        r"\n     [.+&$]\h*" => " ",
-        # free-form continuations
-        r"&\n"           => " "
+        r"\n     [.+&$]\h*" => " ",  # fixed-form startline continuations
+        r"&\n"              => " "   # free-form continuations
     )
     code1 = deepcopy(code)
     for r in replacements
@@ -116,7 +134,7 @@ function printlines(list)
 end
 
 function collectarrays(code)
-    lines = stripfortrancomments(code)
+    lines = stripcomments(code)
     lines = expandlinecontinuation(lines)
     list = splitonlines(lines)
 
@@ -158,29 +176,33 @@ function collectarrays(code)
         vars[i] = replace(vars[i], r"^(\w+)\(.*\)$"m => s"\1")
     end
 
-    @show vars
     return vars
 
 end
 
-function commentdeclarations(code)
-    lines = stripfortrancomments(code)
-    #lines = expandlinecontinuation(lines)
+# replace array's brackets with square braces
+function replacearraysbrackets(code)
+    braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
+    sqbraces = SubstitutionString("[\\1]")
+    arrays = collectarrays(code)
+    println("arrays: $arrays")
+    for a in arrays
+        w = Regex("\\b$(a)\\b","i") # whole word
+        for m in collect(eachmatch(w, code))
+            o = m.offset
+            if code[min(length(code), o+length(a))] == '('
+                code = code[1:o-1] * replace(code[o:end], braces => sqbraces, count=1)
+            end
+        end
+    end
+    return code
+end
+
+function markbypattern(patterns, code)
+    lines = stripcomments(code)
     list = splitonlines(lines)
-
-    matches = [
-        # Match declarations
-        r"^\h*real\h+"mi,
-        r"^\h*real\*[0-9]+\h+"mi,
-        r"^\h*double\h+precision\h+"mi,
-        r"^\h*integer\h+"mi,
-        r"^\h*integer\*[0-9]+\h+"mi,
-        r"^\h*character\h+"mi,
-        r"^\h*character\*"mi
-    ]
-
     marked = Set{Int}()
-    for r in matches
+    for r in patterns
         for (i,l) in enumerate(list)
             occursin(r, l) && push!(marked, i)
         end
@@ -192,17 +214,34 @@ function commentdeclarations(code)
             push!(marked2, i+=1)
         end
     end
+    return sort(collect(marked2))
+end
+
+function commentoutdeclarations(code)
+
+    matches = [
+        # Match declarations
+        r"^\h*real\h+"mi,
+        r"^\h*real\*[0-9]+\h+"mi,
+        r"^\h*double\h+precision\h+"mi,
+        r"^\h*integer\h+"mi,
+        r"^\h*integer\*[0-9]+\h+"mi,
+        r"^\h*character\h+"mi,
+        r"^\h*character\*"mi,
+        r"^\h*external\h+"mi,
+        r"^\h*logical\h+"mi
+    ]
 
     list = splitonlines(code)
-    for i in marked2
+    for i in markbypattern(matches, code)
         list[i] = "#" * list[i]
     end
 
     if !(code isa AbstractVector)
         list = foldl((a,b) -> a*'\n'*b, list)
     end
-    return list
 
+    return list
 end
 
 function processselectcase(code)
@@ -212,10 +251,16 @@ function processselectcase(code)
     for i = 1:length(lines)
         if occursin(r"select\h+case"i, lines[i])
             expr = replace(lines[i], r"^\h*select\h+case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
-            var = @sprintf "EX%s" mod(hash("$(expr)"), 2^16)
-            lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SubstitutionString("\\1"*var*" = "*expr*" #\\2") )
+            if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
+                var = expr
+                lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SubstitutionString("\\1" * "#\\2") )
+            else
+                var = @sprintf "EX%s" mod(hash("$(expr)"), 2^16)
+                lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SubstitutionString("\\1"*var*" = "*expr*" #\\2") )
+            end
             case1 = true
         end
+        # FIXME: I also want to process 'CASE (2:4)'
         if !isempty(var) && occursin(r"^\h*case\h*\("mi, lines[i])
             exprs = replace(lines[i], r"^\h*case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
             if occursin(',', exprs)
@@ -238,15 +283,40 @@ function processselectcase(code)
     return lines
 end
 
-function processparameters(lines)
-    for i = 1:length(lines)
-        if occursin(r"^\h*parameter\h+\("mi, lines[i]) ||
-           occursin(r"\h*[^,#]+\h*,\h*parameter\h*::\h*"mi, lines[i])
-            lines[i] = replace(lines[i], r"," => s";")
-        end
+function processparameters(code)
+    matches = [
+        r"^\h*parameter\h+\("mi
+    ]
+    marked = markbypattern(matches, code)
+    lines, comments = splitoncomment(code)
+    for i in marked
+        lines[i] = replace(lines[i], matches[1] => s"      ")
+        lines[i] = replace(lines[i], r"," => s";")
+        lines[i] = replace(lines[i], r"\)$" => s"")
+        lines[i] = replace(lines[i], r"^     [.+&$]" => "      ")
+    end
+
+    # FIXME: F90
+    matches = [
+        r"\h*[^,#]+\h*,\h*parameter\h*::\h*"mi
+    ]
+
+    lines = map(*, lines, comments)
+    if !(code isa AbstractVector)
+        lines = foldl((a,b) -> a*'\n'*b, lines)
     end
     return lines
 end
+
+function processonelineif(code)
+    # https://regex101.com/r/eF9bK5/3 via
+    # https://stackoverflow.com/questions/36357344/how-to-match-paired-closing-bracket-with-regex
+    r = r"(\h*)(if\h*|IF\h*)(\(((?>[^()]++|(?3))*)\))\h*\n     [.+&$]([^\n]+)"m
+    s = SubstitutionString("\\1\\2\\3\n      \\5\n\\1end")
+    code = replace(code, r => s)
+    return code
+end
+
 
 const newlinereplacements = OrderedDict(
     # \r\n -> \n, \r -> \n
@@ -254,24 +324,17 @@ const newlinereplacements = OrderedDict(
     r"\r" => @s_str("\n")
 )
 
-# Regex/substitution pairs for replace(). Order matters here.
 const multilinereplacements = OrderedDict(
-    #### \r\n -> \n, \r -> \n
-    ###r"\r\n" => @s_str("\n"),
-    ###r"\r" => @s_str("\n"),
-    #### Lowercase everything not commented
-    ####r"^(?!.*!).*"m => lowercase,
-    #### Lowercase start of lines with comments
-    ####r"^.*!"m => lowercase,
-    # Remove '&' / '.' multiline continuations in fixed-form
-    r"^     [.+&$]" => "      ",
+    #### Remove '&' / '.' multiline continuations in fixed-form
+    ###r"^     [.+&$]" => "      ",
     # Labels
     r"^(\h*)(\d+)\h+(.*)$"m => @s_str("    @label L\\2\n\n    \\3"),
 )
 
+# Regex/substitution pairs for replace(). Order matters here.
 const replacements = OrderedDict(
     # Remove '&' / '.' multiline continuations
-    r"^     [.+&$]" => "      ",
+    r"^     [.+&$]"m => "      ",
     # Powers use ^ not **
     #r"\*\*([^*\n]+)" => s"^\1",
     r"\*\*" => "^",
@@ -314,7 +377,8 @@ const replacements = OrderedDict(
     # Replace IF with if
     r"^(\s*)IF(?=\W)"m => s"\1if",
     # Replace ELSE with else
-    r"^(\s*)ELSE(?=\W)"m => s"\1else",
+    #r"^(\s*)ELSE(?=\W)"m => s"\1else",
+    r"^(\s*)ELSE"m => s"\1else",
     # Relace END XXXX with end
     r"^(\h*)end\h*?\w*?(\h*#.*|\h*)$"mi => s"\1end\2",
     # Replace expnent function
@@ -332,24 +396,41 @@ const replacements = OrderedDict(
     # Swap logical symbols
     r"\.true\."i => "true",
     r"\.false\."i => "false",
-    r"\s*\.or\.\s*"i => " || ",
-    r"\s*\.and\.\s*"i => " && ",
-    r"\s*\.not\.\s*"i => " !",
-    r"\s*\.eq\.\s*"i => " == ",
-    r"\s*\.ne\.\s*"i => " != ",
-    r"\s*\.le\.\s*"i => " <= ",
-    r"\s*\.ge\.\s*"i => " >= ",
-    r"\s*\.gt\.\s*"i => " > ",
-    r"\s*\.lt\.\s*"i => " < ",
+    r"(\s+)\.or\.(\s+)"i => s"\1||\2",
+    r"(\s+)\.and\.(\s+)"i => s"\1&&\2",
+    r"(\s+)\.not\.(\s+)"i => s"\1!",
+    r"(\s+)\.eq\.(\s+)"i => s"\1==\2",
+    r"(\s+)\.ne\.(\s+)"i => s"\1!=\2",
+    r"(\s+)\.le\.(\s+)"i => s"\1<=\2",
+    r"(\s+)\.ge\.(\s+)"i => s"\1>=\2",
+    r"(\s+)\.gt\.(\s+)"i => s"\1>\2",
+    r"(\s+)\.lt\.(\s+)"i => s"\1<\2",
+    r"(\s+)\.or\.\s*"i => s"\1|| ",
+    r"(\s+)\.and\.\s*"i => s"\1&& ",
+    r"(\s+)\.not\.\s*"i => s"\1!",
+    r"(\s+)\.eq\.\s*"i => s"\1== ",
+    r"(\s+)\.ne\.\s*"i => s"\1!= ",
+    r"(\s+)\.le\.\s*"i => s"\1<= ",
+    r"(\s+)\.ge\.\s*"i => s"\1>= ",
+    r"(\s+)\.gt\.\s*"i => s"\1> ",
+    r"(\s+)\.lt\.\s*"i => s"\1< ",
+    r"\s*\.or\.\s*"i => s" || ",
+    r"\s*\.and\.\s*"i => s" && ",
+    r"\s*\.not\.\s*"i => s" !",
+    r"\s*\.eq\.\s*"i => s" == ",
+    r"\s*\.ne\.\s*"i => s" != ",
+    r"\s*\.le\.\s*"i => s" <= ",
+    r"\s*\.ge\.\s*"i => s" >= ",
+    r"\s*\.gt\.\s*"i => s" > ",
+    r"\s*\.lt\.\s*"i => s" < ",
     # Fix assignments
     r"(?<=[^\s=])=(?=[^\s=])" => " = ",
     # Add end after single line if with an = assignment
     r"(?<=\s)if\s*([\(].*?) = (.*?)(\s*#.*|)$"mi => s"if \1 = \2 end\3",
     # Single-line IF statement with various terminations
-    #r"(?<=\s)if\s*(.*?)\s*return\s*"i => s"\1 && return\2",
     r"(^\h*)if\s*(.*?)\s*return(\s*#.*|\s*)$"mi => s"\1\2 && return\3",
     r"(^\h*)if\s*(.*?)\s*cycle(\s*#.*|\s*)$"mi => s"\1\2 && continue\3",
-    r"(^\h*)if\s*(.*?)\s*goto\s*(.*)"i => s"\1\2 && @goto L\3",
+    r"(^\h*)if\s*(.*?)\s*goto\s+(\d+\h*)(?!end)(.*)"i => s"\1\2 && @goto L\3\4",
     # Remove expression's brackets after if/elseif/while
     r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)\h*$"m => s"\1\2\3\4",
     r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)(\h*#.*)$"m => s"\1\2\3\4\5",
@@ -366,6 +447,8 @@ const replacements = OrderedDict(
     r"(\W\d+)\.(\D)" => s"\1.0\2",
     # Goto
     r"^(\s*)goto\s+(\d+)"mi => s"\1@goto L\2",
+    r"(\h)goto\s+(\d+)"mi => s"\1@goto L\2",
+    r"(\W)goto\s+(\d+)"mi => s"\1 @goto L\2",
     # Tab to 4 spaces
     r"\t" => "    ",
     # Relace suberror with error and mark for fixup
@@ -416,62 +499,42 @@ function main()
     f = open(filename)
     code = read(f, String)
 
-    # Process newlines.
+    # process newlines
     for r in newlinereplacements
         code = replace(code, r)
     end
 
-    # process includes
-    #includes = r"^\h*include\h+'([^']+)'(\h*!.*|\h*)$"mi
-    #for m in collect(eachmatch(includes, code))
-    #    file2include = dirname(filename) * m.captures[1]
-    #    code2include = read(open(file2include), String)
-    #    code = replace(code,  includes => SubstitutionString(code2include), count=1)
-    #end
+    # convert comments
+    code = convertfortrancomments(code)
 
     # replace array's brackets with square braces
-    braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
-    sqbraces = SubstitutionString("[\\1]")
-    arrays = collectarrays(code)
-    for a in arrays
-        w = Regex("\\b$(a)\\b") # whole word
-        for m in collect(eachmatch(w, code))
-            o = m.offset
-            if code[min(length(code), o+length(a))] == '('
-                code = code[1:o-1] * replace(code[o:end], braces => sqbraces, count=1)
-            end
-        end
-    end
+    code = replacearraysbrackets(code)
 
     # comment out all vars declarations
-    code = commentdeclarations(code)
+    code = commentoutdeclarations(code)
 
     # process multiline replacements
     for r in multilinereplacements
         code = replace(code, r)
     end
 
-    # mark comments
-    code = markfortrancomments(code)
+    # IF one-liners
+    code = processonelineif(code)
 
     # select case
     code = processselectcase(code)
 
-    # split string into vector of string lines and process each separately
-    lines = split(code, '\n')
-    # split lines on comments
-    _, comments = splitonfortrancomment(lines)
+    # parameters
+    code = processparameters(code)
 
-    printlines(lines)
+    lines = splitonlines(code)
 
-    lines = processparameters(lines)
+    # most syntax conversions
     for r in replacements
         for i = 1:length(lines)
-            #@show lines[i], r
             lines[i] = replace(lines[i], r)
         end
     end
-
 
     # concate string lines back together and
     # create functions declaration with custom header
@@ -484,17 +547,18 @@ function main()
             len = length(code)
         end
     end
-    #println(code)
 
+    # some removing
     for r in removal
         code = replace(code, r => "")
     end
 
     # TODO
+    # :: declarations
     # CHARACTER *NN
-    # PARAMETER
+    # PARAMETER: Done
     # SWITCH CASE: Done
-    # include
+    # include: Done
     # write(*,*)
     # write(*,*) && STOP
     # INPUT:
@@ -506,15 +570,6 @@ function main()
     # LSAME
     # XERBLA
     # DO NN I=
-
-    lines = split(code, '\n')
-    #@show lines
-    #@show comments
-    code = ""
-    for e in zip(lines, comments)
-        code = code * e[1] * "\n"
-        #code *= e[1] * e[2] * "\n"
-    end
 
     # Write the output to a .jl file with the same filename stem.
     stem = split(filename, ".")[1]
