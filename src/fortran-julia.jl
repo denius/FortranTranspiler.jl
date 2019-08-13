@@ -237,11 +237,7 @@ function commentoutdeclarations(code)
         list[i] = "#" * list[i]
     end
 
-    if !(code isa AbstractVector)
-        list = foldl((a,b) -> a*'\n'*b, list)
-    end
-
-    return list
+    return code isa AbstractVector ? list : foldl((a,b) -> a*'\n'*b, list)
 end
 
 function processselectcase(code)
@@ -260,7 +256,7 @@ function processselectcase(code)
             end
             case1 = true
         end
-        # FIXME: I also want to process 'CASE (2:4)'
+        # FIXME: I also want to process 'CASE (2:4)' with `if var in (2:4)` or `if 2 <= var <= 4`
         if !isempty(var) && occursin(r"^\h*case\h*\("mi, lines[i])
             exprs = replace(lines[i], r"^\h*case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
             if occursin(',', exprs)
@@ -296,7 +292,7 @@ function processparameters(code)
         lines[i] = replace(lines[i], r"^     [.+&$]" => "      ")
     end
 
-    # FIXME: F90
+    # FIXME: F90 with :: declarations
     matches = [
         r"\h*[^,#]+\h*,\h*parameter\h*::\h*"mi
     ]
@@ -308,14 +304,12 @@ function processparameters(code)
     return lines
 end
 
-function processonelineif(code)
+const replaceonelineif = OrderedDict(
     # https://regex101.com/r/eF9bK5/3 via
     # https://stackoverflow.com/questions/36357344/how-to-match-paired-closing-bracket-with-regex
-    r = r"(\h*)(if\h*|IF\h*)(\(((?>[^()]++|(?3))*)\))\h*\n     [.+&$]([^\n]+)"m
-    s = SubstitutionString("\\1\\2\\3\n      \\5\n\\1end")
-    code = replace(code, r => s)
-    return code
-end
+    r"(\h*)(if\h*|IF\h*)(\(((?>[^()]++|(?3))*)\))\h*\n     [.+&$]([^\n]+)"m =>
+    SubstitutionString("\\1\\2\\3\n      \\5\n\\1end")
+)
 
 
 const newlinereplacements = OrderedDict(
@@ -325,10 +319,8 @@ const newlinereplacements = OrderedDict(
 )
 
 const multilinereplacements = OrderedDict(
-    #### Remove '&' / '.' multiline continuations in fixed-form
-    ###r"^     [.+&$]" => "      ",
     # Labels
-    r"^(\h*)(\d+)\h+(.*)$"m => @s_str("    @label L\\2\n\n    \\3"),
+    r"^(\h*)(\d+)\h+(.*)$"m => @s_str("    @label L\\2\n\n    \\3")
 )
 
 # Regex/substitution pairs for replace(). Order matters here.
@@ -428,9 +420,9 @@ const replacements = OrderedDict(
     # Add end after single line if with an = assignment
     r"(?<=\s)if\s*([\(].*?) = (.*?)(\s*#.*|)$"mi => s"if \1 = \2 end\3",
     # Single-line IF statement with various terminations
-    r"(^\h*)if\s*(.*?)\s*return(\s*#.*|\s*)$"mi => s"\1\2 && return\3",
-    r"(^\h*)if\s*(.*?)\s*cycle(\s*#.*|\s*)$"mi => s"\1\2 && continue\3",
-    r"(^\h*)if\s*(.*?)\s*goto\s+(\d+\h*)(?!end)(.*)"i => s"\1\2 && @goto L\3\4",
+    r"(^\h*)if\s*\((.*?)\)\s*return(\s*#.*|\s*)$"mi => s"\1\2 && return\3",
+    r"(^\h*)if\s*\((.*?)\)\s*cycle(\s*#.*|\s*)$"mi => s"\1\2 && continue\3",
+    r"(^\h*)if\s*\((.*?)\)\s*goto\s+(\d+\h*)(?!end)(.*)"i => s"\1\2 && @goto L\3\4",
     # Remove expression's brackets after if/elseif/while
     r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)\h*$"m => s"\1\2\3\4",
     r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)(\h*#.*)$"m => s"\1\2\3\4\5",
@@ -519,7 +511,9 @@ function main()
     end
 
     # IF one-liners
-    code = processonelineif(code)
+    for r in replaceonelineif
+        code = replace(code, r)
+    end
 
     # select case
     code = processselectcase(code)
@@ -561,8 +555,7 @@ function main()
     # include: Done
     # write(*,*)
     # write(*,*) && STOP
-    # INPUT:
-    # OUTPUT:
+    # intent(...):
     # P_VALUE
     # RWK/IWK
     # M_GETMEM
