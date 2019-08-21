@@ -13,14 +13,18 @@ const doc =
     This julia script converts fortran 77, 90 code into julia.
     It uses naive regex replacements to do as much as possible,
     but the output WILL need further cleanup.
+    From https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 
     Usage:
-      fortran-julia.jl -h | --help
-      fortran-julia.jl [--lowercase | --uppercase] [--formatting] <filename.f>
+        fortran-julia.jl -h | --help
+        fortran-julia.jl [--lowercase | --uppercase] [--formatting] <filename.f>
 
     Options:
-      -h --help     Show this screen.
-      --version     Show version.
+        -h --help     Show this screen.
+        --version     Show version.
+        --uppercase   Convert all identifiers to upper case.
+        --lowercase   Convert all identifiers to lower case.
+        --formatting  You have luck enough.
 
 """
 #=
@@ -58,6 +62,21 @@ function main()
     f = open(args["<filename.f>"])
     code = read(f, String)
 
+    result = convertfromfortran(code, casetransform)
+
+    write(splitext(args["<filename.f>"])[1] * ".jl", result)
+
+    if args["--formatting"]
+        result = JuliaFormatter.format_text(result)
+    end
+
+    write(splitext(args["<filename.f>"])[1] * ".jl", result)
+
+    return nothing
+end
+
+function convertfromfortran(code, casetransform=identity)
+
     # process newlines
     for rx in newlinereplacements
         code = replace(code, rx)
@@ -70,6 +89,13 @@ function main()
     # replace PRINT => WRITE
     code = replace(code, r"(print)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)")
 
+    # replace non - continue/format labels
+    # CAN'T because this goto's spaghetti logic can broke all!
+    # Solution: it is necessary to replace "DO LABEL I=" loops without "CONTINUE"
+    # with julia's "while" loops
+    #code = replace(code, r"(\n)([ ]{0,4})(\d{1,5})(\h+)(?!.*continue|.*format)([^\n]*)"mi =>
+    #                     @s_str("\\1     \\2\\4\\5\n\\2\\3\\4continue"))
+
     isfixedform = !occursin(r"^[^cC*!\n][^\n]{0,3}[^\d\h\n]"m, code)
 
     # save '#' and '!'
@@ -79,17 +105,18 @@ function main()
 
     # convert comments
     code = convertfortrancomments(code)
-    code  = replace(code, r"#=" => "# ") # accident multiline comment
+    code = replace(code, r"#=" => "# ") # accident multiline comment
 
-    # split file on subroutines
+    # split text onto subroutines
     subs, subnames = markbysubroutine(code)
     alllines = splitonlines(code)
-    result = ""
+    result = "using Printf, FortranFiles, OffsetArrsys"
 
     for i = 1:length(subs)-1
 
         code = foldl((a,b) -> a*'\n'*b, view(alllines, subs[i]:subs[i+1]-1))
         print("\nsub name: $(strip(subnames[i]))\n")
+        print("$(subs[i]) : $(subs[i+1]-1)\n")
 
         # replace array's brackets with square braces
         code = replacearraysbrackets(code)
@@ -150,7 +177,7 @@ function main()
             code = replace(code, rx => "")
         end
 
-        result = result == "" ? code : result * '\n' * code
+        result = result * '\n' * code
 
     end # of loop over subroutines
 
@@ -158,22 +185,13 @@ function main()
     result = replace(result, r"iZjAcpPokMoshUYgRvpYxh" => "#")
     result = replace(result, r"iZjAcpPGjkERcWRlKIpYxh" => "!")
 
-    write(splitext(args["<filename.f>"])[1] * ".jl", result)
-
-    if args["--formatting"]
-        result = JuliaFormatter.format_text(result)
-    end
-
-    write(splitext(args["<filename.f>"])[1] * ".jl", result)
-
-    return
+    return result
 end
-
 
 function markbysubroutine(code)
     lines, comments = splitoncomment(code)
 
-    rx = r"^(\h*)((?:[\w*\h]+\h+)function|subroutine|program|module)\h*.*$"mi
+    rx = r"^(\h*)((?:[\w*\h]+\h+)function|subroutine|program|block\h*data|module)\h*.*$"mi
     marked = Vector{Int}(undef, 0)
     names  = Vector{String}(undef, 0)
     for i = 1:length(lines)
@@ -183,7 +201,8 @@ function markbysubroutine(code)
         end
     end
 
-    rx = r"^\h*end\h*(?:(function|subroutine|program|module|)\h*\w*)"
+    rx = r"^\h*end\h*(?!do|if)"i
+    #rx = r"^\h*end\h*(?:(function|subroutine|program|module|)\h*\w*)"i
     marked = sort(collect(marked))
     for i = length(marked):-1:2
         for j = marked[i]:-1:marked[i-1]
@@ -272,19 +291,15 @@ end
 
 function commentoutdeclarations(code)
 
-        #r"^\h*real\h+(?!function)"mi,
-        #r"^\h*real\*[0-9]+\h+(?!function)"mi,
-        #r"^\h*double\h+precision\h+(?!function)"mi,
-        #r"^\h*integer\h+(?!function)"mi,
-        #r"^\h*integer\*[0-9]+\h+(?!function)"mi,
     matches = [
         # Match declarations
         r"^\h*common\h*\/\h*\w+\h*\/\h*"mi,
         r"^\h*dimension\h+"mi,
+        r"^\h*implicit\h*\w+"mi,
         r"^\h*real.*::"mi,
         r"^\h*real\h+(?!function)"mi,
         r"^\h*real\*[0-9]+\h+(?!function)"mi,
-        r"^\h*double\h+precision\h+"mi,
+        r"^\h*double\h*precision\h+(?!function)"mi,
         r"^\h*integer.*::"mi,
         r"^\h*integer\h+(?!function)"mi,
         r"^\h*integer\*[0-9]+\h+(?!function)"mi,
@@ -342,7 +357,7 @@ function collectarrays(code)
         matched[i] = replace(matched[i], r"\*\(" => s"(")           # drop '*' in character*()
     end
     matches = [r"^\h*.*dimension\h*\(.+\)\h*::\h*"mi,
-               r"^\h*character\*\(\*\)\h*"mi, 
+               r"^\h*character\*\(\*\)\h*"mi,
                r"^\h*character\*\(\d+\)\h*"mi ]
     for rx in matches
         for i in list
@@ -377,11 +392,12 @@ function collectcommon(code)
         matched[i] = replace(matched[i], r" " => s"")               # drop spaces
         matched[i] = replace(matched[i], r"\[[^\]]+\]" => s"")       # drop braces
     end
-    println("common: $matched")
+    #println("common: $matched")
     return matched
 end
 
 function replacedocontinue(code)
+    # FIXME: there can be dropped 'continue'
     lines, comments = splitoncomment(code)
     dolabels = Set{String}()
     rx = r"^\h*do\h+(\d+)\h+"i
@@ -394,6 +410,7 @@ function replacedocontinue(code)
         m = collect(eachmatch(rx, lines[i]))
         if length(m) > 0
             if m[1].captures[2] in dolabels
+                #println("capture: $(m[1])")
                 lines[i] = " "^length(m[1].captures[1]) * "end do"
                 pop!(dolabels, m[1].captures[2])
             end
@@ -425,7 +442,7 @@ function collectformat(code)
     lines = stripcomments(code)
     lines = expandlinecontinuation(lines)
     list = splitonlines(lines)
-    rx = r"^\h+(\d+)\h+format\h*\((.+)\)"mi
+    rx = r"^\h*(\d+)\h+format\h*\((.+)\)"mi
     format = Dict{String,String}()
     for i in 1:length(list)
         m = match(rx, list[i])
@@ -435,12 +452,13 @@ function collectformat(code)
         r"^([^']*)'(.*)'([^']*)$"=>s"\1\2\3" # unenclose ''
        )
     for i in keys(format)
+        format[i] = replace(format[i], r"[/]" => ",\\n,")
         v = split(format[i], ",")
-        v = map(strip, v)
+        #v = map(strip, v)
         for rs in FMT
             v = map( a->replace(a, rs), v)
         end
-        format[i] = foldl(*, v)
+        format[i] = foldl((a,b) -> a*','*b, v)
     end
     # collect all other format strings
     lines = splitonlines(code)
@@ -451,8 +469,6 @@ function collectformat(code)
         if !isnothing(m)
             format[string(idx)] = replace(m.captures[2], r"'\((.*)\)'" => s"\1")
             lines[i] = m.captures[1] * string(idx) * m.captures[3]
-            #lines[i] = m.captures[1] * string(idx) * m.captures[3] * m.captures[4]
-            #lines[i] = replace(lines[i], rx => s"")
             idx += 1
         end
     end
@@ -463,12 +479,12 @@ end
 function convertformat(formatstrings)
     rep = r"^(\d+)(.*)$"
     FMT = OrderedDict(
-        r"^A$"i => s"%s",             # A -> %s
-        r"^A(\d*)$"i => s"%\1s",             # A9 -> %9s
-        r"^I(\d*)$"i => s"%\1i",             # I5 -> %5i
-        r"^E(\d*\.\d*)$"i => s"%\1E",        # E7.2 -> %7.2E
-        r"^F(\d*\.\d*)$"i => s"%\1F",        # F7.2 -> %7.2F
-        r"^X$"i => s" ",        # F7.2 -> %7.2F
+        r"^A$"i           => s"%s",               # A -> %s
+        r"^A(\d*)$"i      => s"%\1s",             # A9 -> %9s
+        r"^I(\d*)$"i      => s"%\1i",             # I5 -> %5i
+        r"^E(\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
+        r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
+        r"^X$"i           => s" ",                # X -> ' '
     )
     for k in keys(formatstrings)
         format = split(formatstrings[k], ",") # FIXME: format is recursive
@@ -476,7 +492,10 @@ function convertformat(formatstrings)
         format2 = Vector{String}(undef, 0)
         for (i,el) in enumerate(format) # eval repeats in format
             if occursin(rep, el)
-                [push!(format2, replace(el, rep => s"\2")) for j=1:parse(Int, replace(el,rep=>s"\1"))]
+                num = parse(Int, replace(el, rep=>s"\1"))
+                str = replace(el, rep => s"\2")
+                occursin(r"\(.*\)", str) && (str = replace(str,  r"\((.*)\)"=> s"\1"))
+                [push!(format2, str) for j=1:num]
             else
                 push!(format2, el)
             end
@@ -657,13 +676,26 @@ const multilinereplacements = OrderedDict(
     r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("     \\1@label L\\2\n\n   \\3\\4"),
     #r"(?=^(\h*)(\d+)(\h+)(.*))(?:!^.{5}\w)"m             => @s_str("    \\1@label L\\2\n\n    \\3\\4"),
     #r"^(\h*)(\d+)(\h+)(.*)$"m             => @s_str("    \\1@label L\\2\n\n    \\3\\4")
-    # IF one-liners: https://regex101.com/r/eF9bK5/14 via
+    # IF one-liners: https://regex101.com/r/eF9bK5/16 via
     # https://stackoverflow.com/questions/36357344/how-to-match-paired-closing-bracket-with-regex
-    r"^(\h*)(if\h*)(\(((?>[^()]++|(?3))*)\))(\h*(?!.*then)[^#\n]+)"mi =>
+    r"^(\h*)(if\h*)(\(((?>[^()]++|(?3))*)\))(\h*(?!.*then)[^#\n]+(?:\n[ ]{5}[.$&\w][^\n]+)*)"mi =>
     SubstitutionString("\\1\\2\\3\\5 end "),
     # https://regex101.com/r/eF9bK5/15
-    r"^(\h*)(if\h*)(\(((?>[^()]++|(?3))*)\))(\h*)((#[^\n]*|)*\n[ ]{5}[.$&])+(\h*(?!.*then)[^\n]+)"mi =>
-    SubstitutionString("\\1\\2\\3\\5\\7\n      \\8\n\\1end")
+    r"^(\h*)(if\h*)(\(((?>[^()]++|(?3))*)\))(\h*)((#[^\n]*|)*\n[ ]{5}[.$&\w])+(\h*(?!.*then)[^\n]+)"mi =>
+    SubstitutionString("\\1\\2\\3\\5\\7\n      \\8\n\\1end"),
+    # array repeating statement https://regex101.com/r/R9g9aU/2
+    # skip complex expressions like "(A(I)=1,SIZE(A,1))"
+    r"\(([^)]+)\(([^()]+)\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    r"\(([^)]+)\[([^\[\]]+)\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    r"\(([^)]+)\(([^()]+),([^()]+)\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    r"\(([^)]+)\[([^\[\]]+),([^\[\]]+)\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    r"\(([^)]+)\(([^()]+),([^()]+)\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\2)"),
+    r"\(([^)]+)\[([^\[\]]+),([^\[\]]+)\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\2)"),
+    # DATA statements https://regex101.com/r/XAol49/1 https://regex101.com/r/XAol49/2
+    r"^(\h*)(data\h*)([.\w]+)\h*(\/((?>[^\/,]++|(?3))*)\/)"mi => @s_str("\\1\\3 = \\5"),
+    r"^(\h*)(data\h*)([.\w]+)\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 .= (\\5)"),
+    r"^(\h*)(data\h*)([,.\w]+)\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 = (\\5)"),
+    r"^(\h*)(data\h*)(view\(((?>[^()]++|(?3))*)\))\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 .= (\\6)"),
 )
 
 # Regex/substitution pairs for replace(). Order matters here.
@@ -705,7 +737,7 @@ const replacements = OrderedDict(
     r"^(\s*)include\h+\"(.*)([.][^.]+)\"(\h*#.*|\h*)$"mi => s"\1include(\"\2.jl\")\4",
     # Replace do while -> while
     r"do\h+while"i => s"while",
-    # Replace ELSEIF/ELSE IF with elseif 
+    # Replace ELSEIF/ELSE IF with elseif
     r"^(\s*)else\s*if"mi => s"\1elseif",
     # Replace "IF(" to "if ("
     r"^(\s*)(elseif|if)\("mi => s"\1\2 (",
@@ -717,7 +749,7 @@ const replacements = OrderedDict(
     #r"^(\s*)ELSE(?=\W)"m => s"\1else",
     r"^(\s*)ELSE"m => s"\1else",
     # Relace END XXXX with end
-    r"^(\h*)end\h*(?:function|subroutine|program|module|do|if)\h*\w*$"mi => s"\1end",
+    r"^(\h*)end\h*(?:function|subroutine|program|module|block|do|if)\h*\w*$"mi => s"\1end",
     r"^(\h*)END$"mi => s"\1end",
     # Replace expnent function
     r"(\W)exp\("i => s"\1exp(",
@@ -771,9 +803,8 @@ const replacements = OrderedDict(
     ###r"^(\h*)if\s*\((.*?)\)\s*cycle(\s*#.*|\s*)$"mi => s"\1\2 && continue\3",
     ###r"^(\h*)if\s*\((.*?)\)\s*go\h*to\s+(\d+\h*)(?!end)$"i => s"\1\2 && @goto L\3",
     ####r"(^\h*)if\s*\((.*?)\)\s*go\h*to\s+(\d+\h*)(?!end)(.*)"i => s"\1\2 && @goto L\3\4",
-    # Remove expression's brackets after if/elseif/while
-    r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)\h*$"m => s"\1\2\3\4",
-    r"^(\h*)(if|elseif|while)(\h*)\(([^#]+)\)(\h*#.*)$"m => s"\1\2\3\4\5",
+    # Remove expression's brackets after if/elseif/while https://regex101.com/r/eF9bK5/17
+    r"^(\h*)(if|elseif|while)(\h*)(\(((?>[^()]++|(?4))*)\))\h*$"m => s"\1\2\3\5",
     # Process PARAMETER
     r"^(\h*)parameter(\h+)\((.*)\)(\h*?#.*|\h*?)$"mi => s"\1\2\3\4",
     r"^(\h*).*;\h*parameter\h*::\h*(.*)(\h*?#.*|\h*?)$"mi => s"\1\2\3",
@@ -824,11 +855,12 @@ const replacements = OrderedDict(
 const headersprocessing = OrderedDict(
     # Reorganise functions and doc strings. This may be very project specific.
     # https://regex101.com/r/DAIHhl/1
-    r"(\h+)subroutine(\h+)(\w+)(\(([^)]*)\))(\h*#.*?|\h*)\n(#\h*\n)?#\h*function:\h*(.*?)#\h*\n"is => 
+    r"(\h+)subroutine(\h+)(\w+)(\(([^)]*)\))(\h*#.*?|\h*)\n(#\h*\n)?#\h*function:\h*(.*?)#\h*\n"is =>
     SubstitutionString("\"\"\"\n    \\3(\\5)\n\n\\8\"\"\"\nfunction \\3(\\5)\n#\n"),
     # Simple subroutine
     r"^\h*subroutine\h+"mi => s"function ",
     r"^\h*program\h+(\w+)"mi => s"function \1()",
+    r"^\h*block\h*data\h+(\w+)"mi => s"function \1()",
     r"^\h*module\h+"mi => s"module ",
     r"^\h*real(?:\*\d{1,2})?\h*function\h+"mi => s"function ",
     r"^\h*double\h*precision\h*function\h+"mi => s"function ",
@@ -858,4 +890,3 @@ const removal = [
 ]
 
 main()
-
