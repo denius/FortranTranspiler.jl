@@ -4,7 +4,7 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
     "${BASH_SOURCE[0]}" "$@"
 =#
 
-using DataStructures, Printf, ArgParse, JuliaFormatter
+using DataStructures, Printf, JuliaFormatter
 
 #=
 
@@ -37,17 +37,18 @@ function printusage()
 
     This julia script converts fortran 77, 90 code into julia.
     It uses naive regex replacements to do as much as possible,
-    but the output WILL need further cleanup.
-    From https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
+    but the output may need further cleanup.
+    Based on https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 
     Usage:
         fortran-julia.jl -h | --help
         fortran-julia.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> ...
 
     Options:
-        -h --help       Show this screen.
+        -h, --help      Show this screen.
         --version       Show version.
         -q, --quiet     Suppress all console output.
+        -v, --verbose   Be verbose.
         -v, --verbose   Be more verbose.
         --uppercase     Convert all identifiers to upper case.
         --lowercase     Convert all identifiers to lower case.
@@ -58,125 +59,19 @@ function printusage()
 ")
 end
 
-function parse_args(lines)
-    args = Dict{String, Any}()
-    args["--formatting"] = false
-    args["--quiet"]      = false
-    args["-q"]           = false
-    args["-q"]           = false
-    args["--verbose"]    = false
-    args["-v"]           = false
-    args["--uppercase"]  = false
-    args["--lowercase"]  = false
-    args["--greeks"]     = false
-    args["--subscripts"] = false
-    args["--help"]       = false
-    fnames               = Vector{String}()
-
-    while length(lines) > 0
-        if first(args) == "--help" # end of options
-            printusage()
-            exit(0)
-        elseif haskey(args, first(lines))
-            args[first(lines)] = true
-            popfirst!(lines)
-        elseif first(args) == "--" # end of options
-            popfirst!(lines)
-            break
-        elseif occursin(r"^--\w\w+$", first(lines)) || occursin(r"^-\w$", first(lines))
-            @error("unrecognized option in ARGS: '$(first(args))'")
-        else
-            push!(fnames, first(lines))
-            popfirst!(lines)
-        end
-    end
-    while length(lines) > 0
-        push!(fnames, first(lines))
-        popfirst!(lines)
-    end
-
-    args["--verbose"] = args["--verbose"] || args["-v"]
-    args["--quiet"]   = args["--quiet"] || args["-q"]
-    return args, fnames
-end
 
 function main(args)
-
-#    s = ArgParseSettings("This julia script converts fortran 77, 90 code into julia.
-#  It uses naive regex replacements to do as much as possible,
-#  but the output WILL need further cleanup.
-#  From https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56 ",
-#        version = "Version 0.1",
-#        add_version = true)
-#
-#    @add_arg_table s begin
-#        "--formatting"
-#            nargs = 0
-#            help = "you have luck enough"
-#        "--quiet", "-q"
-#            nargs = 0
-#            help = "suppress all console output"
-#        "--verbose", "-v"
-#            nargs = 0
-#            help = "suppress all console output"
-#        "--uppercase"
-#            nargs = 0
-#            help = "convert all identifiers to upper case"
-#        "--lowercase"
-#            nargs = 0
-#            help = "convert all identifiers to lower case"
-#        "--greeks"
-#            nargs = 0
-#            help = "replace part of vars names with corresponding greeks unicode symbols like δ1"
-#        "--subscripts"
-#            nargs = 0
-#            help = "replace SOMEVAR_??? suffixes of vars names with unicode subscripts, if exist"
-#        "<filenames.f>"
-#            nargs = '*'
-#            default = [""]
-#            help = "file or list of files to proceed"
-#            required = true
-#    end
-#
-#    args = parse_args(args, s)
-#    for (key,val) in args println("  $key  =>  $(repr(val))"); end
-
     args, fnames = parse_args(args)
-    if args["--verbose"]
-        for (key,val) in args println("  $key  =>  $(repr(val))"); end
-        println("fnames: $fnames")
-    end
+    casetransform = args["--uppercase"] ? uppercase :
+                    args["--lowercase"] ? lowercase : identity
 
-    if args["--uppercase"]
-        casetransform = uppercase
-    elseif args["--lowercase"]
-        casetransform = lowercase
-    else
-        casetransform = identity
-    end
-
-    exit(1)
-
-    #for fname in args["<filenames.f>"]
     for fname in fnames
-
         isfile(fname) || continue
-
         code = open(fname) |> read |> String
-
-        result = convertfromfortran(code, casetransform=casetransform,
-                                    verbose=args["verbose"], quiet=args["quiet"])
-
+        result = convertfromfortran(code, casetransform=casetransform, quiet=args["--quiet"],
+                                    verbose=args["--verbose"], veryverbose=args["--veryverbose"])
         write(splitext(fname)[1] * ".jl", result)
-
-        #try
-        #    #result = replace(result, r"\n"mi => s";")
-        #    Meta.parse(result)
-        #catch e
-        #    @info("$(splitext(fname)[1] * ".jl")\nPARSING IS NOT SUCCESSFULL\n", e)
-        #end
-
-        if args["formatting"]
+        if args["--formatting"]
             try
                 result = JuliaFormatter.format_text(result, margin = 192)
                 write(splitext(fname)[1] * ".jl", result)
@@ -184,13 +79,12 @@ function main(args)
                 @info("$(splitext(fname)[1] * ".jl")\nFORMATTING IS NOT SUCCESSFULL\n")
             end
         end
-
     end
-
     return nothing
 end
 
-function convertfromfortran(code; casetransform=identity, verbose=false, quiet=false)
+function convertfromfortran(code; casetransform=identity, quiet=false,
+                            verbose=false, veryverbose=false)
 
     # should be '\n' newlines only
     for rx in newlinereplacements
@@ -222,18 +116,18 @@ function convertfromfortran(code; casetransform=identity, verbose=false, quiet=f
     for i = 1:length(subs)-1
 
         code = foldl((a,b) -> a*'\n'*b, view(alllines, subs[i]:subs[i+1]-1))
-        quiet || print("\nsub name: $(strip(subnames[i]))\n")
-        quiet || print("$(subs[i]) : $(subs[i+1]-1)\n")
+        verbose && print("\nsub name: $(strip(subnames[i]))\n")
+        verbose && print("$(subs[i]) : $(subs[i+1]-1)\n")
 
         scalars, arrays = collectvars(code)
-        quiet || println("scalars : $scalars")
-        quiet || println("arrays  : $arrays")
+        verbose && println("scalars : $scalars")
+        verbose && println("arrays  : $arrays")
 
         # replace array's brackets with square braces
         code = replacearraysbrackets(code, arrays)
 
         commons = collectcommon(code)
-        verbose && println("common: $(commons)")
+        veryverbose && println("commons : $(commons)")
 
         code, formats = collectformat(code)
         formats = convertformat(formats)
@@ -303,7 +197,7 @@ function convertfromfortran(code; casetransform=identity, verbose=false, quiet=f
             #code = replace(code, r"\n"mi => s";")
             Meta.parse(code)
         catch e
-            @info("$(strip(subnames[i]))\n$e\n")
+            quiet || @error("$(strip(subnames[i]))\n$e\n")
         end
 
         # concat all subroutines together back
@@ -314,6 +208,63 @@ function convertfromfortran(code; casetransform=identity, verbose=false, quiet=f
     result = restorespecialsymbols(result)
 
     return result
+end
+
+function parse_args(lines)
+    function therecanbeonlyone(args, v1, v2)
+        args[v1] = args[v1] || args[v2]; delete!(args, v2)
+    end
+
+    args = OrderedDict{String, Any}()
+    args["--quiet"]       = args["-q"]  = false
+    args["--verbose"]     = args["-v"]  = false
+    args["--veryverbose"] = args["-vv"] = false
+    args["--uppercase"]   = false
+    args["--lowercase"]   = false
+    args["--greeks"]      = false
+    args["--subscripts"]  = false
+    args["--formatting"]  = false
+    fnames               = Vector{String}()
+
+    while length(lines) > 0
+        if first(args) == "--help" || first(args) == "-h"
+            printusage()
+            exit(0)
+        elseif haskey(args, first(lines))
+            args[first(lines)] += 1
+            popfirst!(lines)
+        elseif first(args) == "--" # end of options
+            popfirst!(lines)
+            break
+        elseif occursin(r"^--\w\w+$", first(lines)) || occursin(r"^-\w$", first(lines))
+            @error("unrecognized option in ARGS: '$(first(lines))'")
+            exit(0)
+        else
+            push!(fnames, first(lines))
+            popfirst!(lines)
+        end
+    end
+    while length(lines) > 0
+        push!(fnames, first(lines))
+        popfirst!(lines)
+    end
+
+    (args["--verbose"] == 2 || args["-v"] == 2 || args["-vv"]) &&
+        (args["--veryverbose"] = args["--verbose"] = args["-v"] = true)
+    for (k,v) in args
+        !isa(args[k], Bool) && args[k] == 1 && (args[k] = true)
+    end
+
+    therecanbeonlyone(args, "--veryverbose", "-vv")
+    therecanbeonlyone(args, "--verbose", "-v")
+    therecanbeonlyone(args, "--quiet", "-q")
+
+    if args["--veryverbose"]
+        for (key,val) in args @printf("  %-13s  =>  %-5s\n", key, repr(val)); end
+        println("  fnames: $fnames")
+    end
+
+    return args, fnames
 end
 
 function markbysubroutine(code)
