@@ -32,70 +32,149 @@ using DataStructures, Printf, ArgParse, JuliaFormatter
     M_GETMEM
 =#
 
-function main(args)
+function printusage()
+    println("fortran-julia.jl
 
-    s = ArgParseSettings("This julia script converts fortran 77, 90 code into julia.
-  It uses naive regex replacements to do as much as possible,
-  but the output WILL need further cleanup.
-  From https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56 ",
-        version = "Version 0.1",
-        add_version = true)
+    This julia script converts fortran 77, 90 code into julia.
+    It uses naive regex replacements to do as much as possible,
+    but the output WILL need further cleanup.
+    From https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 
-    @add_arg_table s begin
-        "--formatting"
-            nargs = 0
-            help = "you have luck enough"
-        "--quiet", "-q"
-            nargs = 0
-            help = "suppress all console output"
-        "--verbose", "-v"
-            nargs = 0
-            help = "suppress all console output"
-        "--uppercase"
-            nargs = 0
-            help = "convert all identifiers to upper case"
-        "--lowercase"
-            nargs = 0
-            help = "convert all identifiers to lower case"
-        "--greeks"
-            nargs = 0
-            help = "replace whole word vars names with corresponding greeks unicode symbols"
-        "--fullgreeks"
-            nargs = 0
-            help = "replace vars names which is greeks letters with some suffix like δ1"
-        "--subscripts"
-            nargs = 0
-            help = "replace SOMEVAR_??? suffixes of vars names with unicode subscripts, if exist"
-        "--fullsubscripts"
-            nargs = 0
-            help = "same as --subscripts but without _. Funny but not useful"
-        "<filenames.f>"
-            nargs = '*'
-            default = [""]
-            help = "file or list of files to proceed"
-            required = true
+    Usage:
+        fortran-julia.jl -h | --help
+        fortran-julia.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> ...
+
+    Options:
+        -h --help       Show this screen.
+        --version       Show version.
+        -q, --quiet     Suppress all console output.
+        -v, --verbose   Be more verbose.
+        --uppercase     Convert all identifiers to upper case.
+        --lowercase     Convert all identifiers to lower case.
+        --greeks        Replace part of vars names with greeks unicode symbols like δ1.
+        --subscripts    Replace SOMEVAR_??? suffixes of vars names with unicode subscripts, if exist.
+        --              The end of options.
+        --formatting    You have luck enough.
+")
+end
+
+function parse_args(lines)
+    args = Dict{String, Any}()
+    args["--formatting"] = false
+    args["--quiet"]      = false
+    args["-q"]           = false
+    args["-q"]           = false
+    args["--verbose"]    = false
+    args["-v"]           = false
+    args["--uppercase"]  = false
+    args["--lowercase"]  = false
+    args["--greeks"]     = false
+    args["--subscripts"] = false
+    args["--help"]       = false
+    fnames               = Vector{String}()
+
+    while length(lines) > 0
+        if first(args) == "--help" # end of options
+            printusage()
+            exit(0)
+        elseif haskey(args, first(lines))
+            args[first(lines)] = true
+            popfirst!(lines)
+        elseif first(args) == "--" # end of options
+            popfirst!(lines)
+            break
+        elseif occursin(r"^--\w\w+$", first(lines)) || occursin(r"^-\w$", first(lines))
+            @error("unrecognized option in ARGS: '$(first(args))'")
+        else
+            push!(fnames, first(lines))
+            popfirst!(lines)
+        end
+    end
+    while length(lines) > 0
+        push!(fnames, first(lines))
+        popfirst!(lines)
     end
 
-    args = parse_args(args, s)
-    for (key,val) in args println("  $key  =>  $(repr(val))"); end
+    args["--verbose"] = args["--verbose"] || args["-v"]
+    args["--quiet"]   = args["--quiet"] || args["-q"]
+    return args, fnames
+end
 
-    if args["uppercase"]
+function main(args)
+
+#    s = ArgParseSettings("This julia script converts fortran 77, 90 code into julia.
+#  It uses naive regex replacements to do as much as possible,
+#  but the output WILL need further cleanup.
+#  From https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56 ",
+#        version = "Version 0.1",
+#        add_version = true)
+#
+#    @add_arg_table s begin
+#        "--formatting"
+#            nargs = 0
+#            help = "you have luck enough"
+#        "--quiet", "-q"
+#            nargs = 0
+#            help = "suppress all console output"
+#        "--verbose", "-v"
+#            nargs = 0
+#            help = "suppress all console output"
+#        "--uppercase"
+#            nargs = 0
+#            help = "convert all identifiers to upper case"
+#        "--lowercase"
+#            nargs = 0
+#            help = "convert all identifiers to lower case"
+#        "--greeks"
+#            nargs = 0
+#            help = "replace part of vars names with corresponding greeks unicode symbols like δ1"
+#        "--subscripts"
+#            nargs = 0
+#            help = "replace SOMEVAR_??? suffixes of vars names with unicode subscripts, if exist"
+#        "<filenames.f>"
+#            nargs = '*'
+#            default = [""]
+#            help = "file or list of files to proceed"
+#            required = true
+#    end
+#
+#    args = parse_args(args, s)
+#    for (key,val) in args println("  $key  =>  $(repr(val))"); end
+
+    args, fnames = parse_args(args)
+    if args["--verbose"]
+        for (key,val) in args println("  $key  =>  $(repr(val))"); end
+        println("fnames: $fnames")
+    end
+
+    if args["--uppercase"]
         casetransform = uppercase
-    elseif args["lowercase"]
+    elseif args["--lowercase"]
         casetransform = lowercase
     else
         casetransform = identity
     end
 
-    for fname in args["<filenames.f>"]
+    exit(1)
+
+    #for fname in args["<filenames.f>"]
+    for fname in fnames
 
         isfile(fname) || continue
 
         code = open(fname) |> read |> String
 
-        result = convertfromfortran(code, casetransform)
+        result = convertfromfortran(code, casetransform=casetransform,
+                                    verbose=args["verbose"], quiet=args["quiet"])
 
         write(splitext(fname)[1] * ".jl", result)
+
+        #try
+        #    #result = replace(result, r"\n"mi => s";")
+        #    Meta.parse(result)
+        #catch e
+        #    @info("$(splitext(fname)[1] * ".jl")\nPARSING IS NOT SUCCESSFULL\n", e)
+        #end
 
         if args["formatting"]
             try
@@ -111,10 +190,7 @@ function main(args)
     return nothing
 end
 
-function convertfromfortran(code, casetransform=identity)
-
-    quiet = true
-    verbose = false
+function convertfromfortran(code; casetransform=identity, verbose=false, quiet=false)
 
     # should be '\n' newlines only
     for rx in newlinereplacements
@@ -141,7 +217,7 @@ function convertfromfortran(code, casetransform=identity)
     alllines = splitonlines(code)
 
     # converted code will be stored in string `result`
-    result = "using Printf, FortranFiles, Parameters, OffsetArrsys"
+    result = "using Printf, FortranFiles, Parameters, OffsetArrays"
 
     for i = 1:length(subs)-1
 
@@ -180,6 +256,7 @@ function convertfromfortran(code, casetransform=identity)
             code = replace(code, rx)
         end
 
+        #write("test.jl", code)
         code = processselectcase(code)
 
         code = processparameters(code)
@@ -220,6 +297,13 @@ function convertfromfortran(code, casetransform=identity)
         # removing unnecessaries
         for rx in removal
             code = replace(code, rx => "")
+        end
+
+        try
+            #code = replace(code, r"\n"mi => s";")
+            Meta.parse(code)
+        catch e
+            @info("$(strip(subnames[i]))\n$e\n")
         end
 
         # concat all subroutines together back
@@ -303,7 +387,7 @@ end
 function processlinescontinuation(lines::AbstractVector)
     # `lines` should be lines without comments
     rx1 = r"^(.*[^,&])(&|)$"
-    rx2 = r"^([ ]{5}[^ ]\h*)([+*\/,-]|==|<=|>=|!=|<|>|&&|\|\|)(.*)$"
+    rx2 = r"^([ ]{5}[^ ]\h*)([+*\/,-]|==|<=|>=|!=|<|>|&&|\|\||=)(.*)$"
     # move arithmetic operator from start of continuator to tail of previous line
     for i = 2:length(lines)
         if (m2 = match(rx2, lines[i])) != nothing
@@ -367,6 +451,7 @@ function commentoutdeclarations(code)
         r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*character.*::"mi,
         r"^\h*character\h+(?!.*function)"mi,
+        r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
         r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*external\h+"mi,
         r"^\h*logical.*::"mi,
@@ -423,15 +508,22 @@ function collectvars(code)
     end
 
     # add undoubted arrays
-    # Note: to any fortran 'CHARACTER' can apply get index operator: 'C(:1)'
+    # Note: to any fortran 'CHARACTER' can be applied get index operator: 'C(:1)'
     matches = [r"^\h*.*dimension\h*\(.+\)\h*::\h*"mi,
                r"^\h*character\h+"mi,
                r"^\h*character\*\h+"mi,
+               r"^\h*character\*\d+\h+"mi,
                r"^\h*character\*\(\*\)\h*"mi,
                r"^\h*character\*\(\d+\)\h*"mi ]
     for rx in matches
         for l in lines
-            occursin(rx, l) && push!(matched, replace(replace(l, rx=>""), r" " => s""))
+            if occursin(rx, l)
+                line = replace(l, rx => "")
+                line = replace(line, r" " => s"")
+                line = replace(line, r"(\(((?>[^()]++|(?1))*)\))" => s"") # braces and its containment
+                line = replace(line, r"\*" => s"")
+                push!(matched, line)
+            end
         end
     end
 
@@ -1112,7 +1204,7 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d\d\d)(\h+)continue(.*)$"mi => @s_str("   \\1\\3@label L\\2 \\4"),
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
     # https://regex101.com/r/J5ViSG/1
-    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("     \\1@label L\\2\n\n   \\3\\4"),
+    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("     \\1@label L\\2\n\n    \\3\\4"),
     # array repeating statement https://regex101.com/r/R9g9aU/2
     # complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
     r"\(([^)]+)\(([^()]+)\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
@@ -1284,8 +1376,8 @@ const replacements = OrderedDict(
     r"\bexit\b"mi => s"break",
     #r"\breturn\b"mi => s"return",
     r"\bcycle\b"mi => s"continue",
-    r"\bstop\b\h+(\d+)"mi => s"exit(code=\1)",
-    r"\bstop\b"mi => s"exit(code=1)",
+    r"\bstop\b\h+(\d+)"mi => s"exit(\1)",
+    r"\bstop\b"mi => s"exit(1)",
     r"//" => " * ",
     # Format floats as "5.0" not "5."
     r"(\W\d+)\.(\D)" => s"\1.0\2",
