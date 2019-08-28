@@ -44,6 +44,10 @@ function printusage()
         fortran-julia.jl -h | --help
         fortran-julia.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> ...
 
+    Samples:
+        fortran-julia.jl *.f*
+        fortran-julia.jl **/*.[fF]*
+
     Options:
         -h, --help      Show this screen.
         --version       Show version.
@@ -54,7 +58,7 @@ function printusage()
         --lowercase     Convert all identifiers to lower case.
         --greeks        Replace part of vars names with greeks unicode symbols like δ1.
         --subscripts    Replace SOMEVAR_??? suffixes of vars names with unicode subscripts, if exist.
-        --              The end of options.
+        --              The rest of the args are only filenames.
         --formatting    You have luck enough.
 ")
 end
@@ -67,6 +71,7 @@ function main(args)
 
     for fname in fnames
         isfile(fname) || continue
+        args["--verbose"] && print("$(fname):\n")
         code = open(fname) |> read |> String
         result = convertfromfortran(code, casetransform=casetransform, quiet=args["--quiet"],
                                     verbose=args["--verbose"], veryverbose=args["--veryverbose"])
@@ -83,7 +88,7 @@ function main(args)
     return nothing
 end
 
-function convertfromfortran(code; casetransform=identity, quiet=false,
+function convertfromfortran(code; casetransform=identity, quiet=true,
                             verbose=false, veryverbose=false)
 
     # should be '\n' newlines only
@@ -116,20 +121,22 @@ function convertfromfortran(code; casetransform=identity, quiet=false,
     for i = 1:length(subs)-1
 
         code = foldl((a,b) -> a*'\n'*b, view(alllines, subs[i]:subs[i+1]-1))
-        verbose && print("\nsub name: $(strip(subnames[i]))\n")
-        verbose && print("$(subs[i]) : $(subs[i+1]-1)\n")
+        #verbose && print("\nsub name: $(strip(subnames[i]))\n")
+        #verbose && print("$(subs[i]) : $(subs[i+1]-1)\n")
+        verbose && print("[$(subs[i]):$(subs[i+1]-1)] $(strip(subnames[i]))\n")
 
         scalars, arrays = collectvars(code)
-        verbose && println("scalars : $scalars")
-        verbose && println("arrays  : $arrays")
+        veryverbose && length(scalars) > 0 && println("    scalars : $scalars")
+        veryverbose && length(arrays) > 0  && println("    arrays  : $arrays")
 
         # replace array's brackets with square braces
         code = replacearraysbrackets(code, arrays)
 
         commons = collectcommon(code)
-        veryverbose && println("commons : $(commons)")
+        veryverbose && length(commons) > 0 && println("    COMMONs : $commons")
 
         code, formats = collectformat(code)
+        veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
         formats = convertformat(formats)
 
         # comment out all vars declarations
@@ -143,6 +150,8 @@ function convertfromfortran(code; casetransform=identity, quiet=false,
         code = replacedocontinue(code, dolabels, gotolabels)
         code = processconditionalgotos(code)
 
+        code = enclosereadwrite(code)
+
         code = processifstatements(code)
 
         # process multiline replacements
@@ -155,9 +164,11 @@ function convertfromfortran(code; casetransform=identity, quiet=false,
 
         code = processparameters(code)
 
+        code = processdata(code)
+
         lines = splitonlines(code)
 
-        lines = enclosereadwrite(lines)
+        #lines = enclosereadwrite(lines)
 
         lines, comments = splitoncomment(lines)
 
@@ -193,11 +204,13 @@ function convertfromfortran(code; casetransform=identity, quiet=false,
             code = replace(code, rx => "")
         end
 
+        code = restorespecialsymbols(code)
+
         try
-            #code = replace(code, r"\n"mi => s";")
-            Meta.parse(code)
+            Meta.parse(code, 1)
         catch e
             quiet || @error("$(strip(subnames[i]))\n$e\n")
+            #quiet || @error("$(strip(subnames[i]))\n$e\n$(stacktrace(catch_backtrace()))\n")
         end
 
         # concat all subroutines together back
@@ -205,16 +218,18 @@ function convertfromfortran(code; casetransform=identity, quiet=false,
 
     end # of loop over subroutines
 
-    result = restorespecialsymbols(result)
+    #result = restorespecialsymbols(result)
 
     return result
 end
 
 function parse_args(lines)
-    function therecanbeonlyone(args, v1, v2)
-        args[v1] = args[v1] || args[v2]; delete!(args, v2)
+    function therecanbeonlyone!(args, v1, v2)
+        args[v1] = args[v1] || args[v2]
+        delete!(args, v2)
     end
 
+    fnames = Vector{String}()
     args = OrderedDict{String, Any}()
     args["--quiet"]       = args["-q"]  = false
     args["--verbose"]     = args["-v"]  = false
@@ -224,7 +239,6 @@ function parse_args(lines)
     args["--greeks"]      = false
     args["--subscripts"]  = false
     args["--formatting"]  = false
-    fnames               = Vector{String}()
 
     while length(lines) > 0
         if first(args) == "--help" || first(args) == "-h"
@@ -249,15 +263,16 @@ function parse_args(lines)
         popfirst!(lines)
     end
 
-    (args["--verbose"] == 2 || args["-v"] == 2 || args["-vv"]) &&
-        (args["--veryverbose"] = args["--verbose"] = args["-v"] = true)
+    if args["--verbose"] == 2 || args["-v"] == 2 || args["-vv"] == 1
+        args["--veryverbose"] = args["--verbose"] = args["-vv"] = args["-v"] = true
+    end
     for (k,v) in args
         !isa(args[k], Bool) && args[k] == 1 && (args[k] = true)
     end
 
-    therecanbeonlyone(args, "--veryverbose", "-vv")
-    therecanbeonlyone(args, "--verbose", "-v")
-    therecanbeonlyone(args, "--quiet", "-q")
+    therecanbeonlyone!(args, "--veryverbose", "-vv")
+    therecanbeonlyone!(args, "--verbose", "-v")
+    therecanbeonlyone!(args, "--quiet", "-q")
 
     if args["--veryverbose"]
         for (key,val) in args @printf("  %-13s  =>  %-5s\n", key, repr(val)); end
@@ -385,7 +400,7 @@ end
 
 function commentoutdeclarations(code)
 
-    matches = [
+    patterns = [
         # Match declarations
         r"^\h*common\h*\/\h*\w+\h*\/\h*"mi,
         r"^\h*dimension\h+"mi,
@@ -393,6 +408,7 @@ function commentoutdeclarations(code)
         r"^\h*real.*::"mi,
         r"^\h*real\h+(?!.*function)"mi, # https://regex101.com/r/CFiiOx/1
         r"^\h*real\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*double\h*precision.*::"mi,
         r"^\h*double\h*precision\h+(?!.*function)"mi,
         r"^\h*complex.*::"mi,
         r"^\h*complex\h+(?!.*function)"mi,
@@ -403,6 +419,8 @@ function commentoutdeclarations(code)
         r"^\h*character.*::"mi,
         r"^\h*character\h+(?!.*function)"mi,
         r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\*\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
         r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*external\h+"mi,
         r"^\h*logical.*::"mi,
@@ -411,7 +429,7 @@ function commentoutdeclarations(code)
     ]
 
     lines = splitonlines(code)
-    for i in markbypattern(matches, code)
+    for i in markbypattern(patterns, code)
         lines[i] = "#" * lines[i]
     end
 
@@ -423,7 +441,7 @@ function collectvars(code)
     code1 = concatlinecontinuation(code1)
     lines = splitonlines(code1)
 
-    matches = [
+    patterns = [
         # Match declarations
         r"^\h*common\h*/\h*\w+\h*/\h*"mi,
         r"^\h*dimension\h+"mi,
@@ -440,18 +458,24 @@ function collectvars(code)
     ]
 
     matched = Vector{String}()
-    for rx in matches
+    for rx in patterns
         for l in lines
             occursin(rx, l) && push!(matched, replace(replace(l, rx => s""), r" " => s""))
         end
     end
 
-    matchedvars = map(a->replace(a, r"\*\(" => s"("), deepcopy(matched))  # drop '*' in character*()
-    matchedvars = map(a->replace(a, r"\([^)]+\)" => s""), matchedvars)    # clean braces
+    matchedvars = map(a->replace(a, r"\*\(" => s"("), deepcopy(matched))  # drop '*' in 'character*()'
+    matchedvars = map(a->replace(a, r"\*[\d]+" => s""), matchedvars)      # clean '*7' in 'A*7'
+    matchedvars = map(a->replace(a, r"(\(((?>[^\(\)]++|(?1))*)\))" => s""), matchedvars)    # clean braces
+    matchedvars = map(a->replace(a, r"(\/((?>[^\/]*|(?1))*)\/)" => s""), matchedvars)  # clean /.../ -- statics
 
     # catch only arrays names
     for i in 1:length(matched)
-        matched[i] = replace(matched[i], r"\([^)]+\)" => s"()")   # clean inside braces
+        matched[i] = replace(matched[i], r"\*([\d]+)" => s"(\1)") # character A*7 -> A(7)
+        matched[i] = replace(matched[i], r"(\(((?>[^\(\)]++|(?1))*)\))" => s"()")   # clean inside braces
+        #matched[i] = replace(matched[i], r"\([^)]+\)" => s"()")   # clean inside braces
+        # https://regex101.com/r/weQOSe/4
+        matched[i] = replace(matched[i], r"(\/((?>[^\/]*|(?1))*)\/)" => s"")   # clean /.../ -- statics
         matched[i] = replace(matched[i], r"[^(),]+," => s"")      # drop non-arrays (without braces)
         matched[i] = replace(matched[i], r",[^(),]+$"m => s"")    # drop last non-array (without braces)
         matched[i] = replace(matched[i], r"^[^(),]+$"m => s"")    # drop single non-array (without braces)
@@ -460,17 +484,19 @@ function collectvars(code)
 
     # add undoubted arrays
     # Note: to any fortran 'CHARACTER' can be applied get index operator: 'C(:1)'
-    matches = [r"^\h*.*dimension\h*\(.+\)\h*::\h*"mi,
+    patterns = [r"^\h*.*dimension\h*\(.+\)\h*::\h*"mi,
                r"^\h*character\h+"mi,
                r"^\h*character\*\h+"mi,
                r"^\h*character\*\d+\h+"mi,
+               r"^\h*character\(\d+\)\h*"mi,
                r"^\h*character\*\(\*\)\h*"mi,
                r"^\h*character\*\(\d+\)\h*"mi ]
-    for rx in matches
+    for rx in patterns
         for l in lines
             if occursin(rx, l)
                 line = replace(l, rx => "")
                 line = replace(line, r" " => s"")
+                line = replace(line, r"(\/((?>[^\/]*|(?1))*)\/)" => s"")   # clean /.../ -- statics
                 line = replace(line, r"(\(((?>[^()]++|(?1))*)\))" => s"") # braces and its containment
                 line = replace(line, r"\*" => s"")
                 push!(matched, line)
@@ -830,9 +856,11 @@ function processifstatements(code)
     # https://regex101.com/r/eF9bK5/22
     rx2 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))\h*((?!.*then)[^#\n]+(?:\n[ ]{5}[.$&\w][^\n]+)+)"mi =>
     SubstitutionString("\\1if_iZjAcpPokM\\2\\3 \\5\n\\1end ")
-    # https://regex101.com/r/CAgzIA/3
-    rx3 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))(\h*)((#[^\n]*|)*\n[ ]{5}[.$&\w])+(\h*(?!.*then)[^\n]+)((?:\n[ ]{5}[.$&\w][^\n]+)*|)"mi =>
-    SubstitutionString("\\1if_iZjAcpPokM\\2\\3 \\7\n      \\8\\9\n\\1end")
+    # https://regex101.com/r/CAgzIA/5
+    rx3 = r"^(\h*)(if\h*)(\(((?>[^()]++|(?3))*)\))([\h\n]*(?:^[*c#].*$|))((#[^\n]*|)*\n[ ]{5}[.$&])+(\h*(?!.*then)[^\n]+)((?:\n[ ]{5}[.$&\w][^\n]+|(?:\n[*c#][^\n]*$))*)"mi =>
+    #rx3 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))(\h*)((#[^\n]*|)*\n[ ]{5}[.$&\w])+(\h*(?!.*then)[^\n]+)((?:\n[ ]{5}[.$&\w][^\n]+)*|)"mi =>
+    SubstitutionString("\\1if_iZjAcpPokM\\3 \\7\n      \\8\\9\n\\1end")
+    #SubstitutionString("\\1if_iZjAcpPokM\\2\\3 \\7\n      \\8\\9\n\\1end")
 
     code = replace(code, rx2)
     code = replace(code, rx3)
@@ -843,18 +871,47 @@ function processifstatements(code)
 end
 
 """
-replace array's brackets with square braces
+replace array's braces with square brackets
 """
 function replacearraysbrackets(code, arrays)
     braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
-    sqbraces = SubstitutionString("[\\1]")
+    brackets = SubstitutionString("[\\1]")
     for a in arrays
         w = Regex("\\b$(a)\\b","i") # whole word
         for m in collect(eachmatch(w, code))
             o = m.offset
-            if code[min(length(code), o+length(a))] == '('
-                code = code[1:o-1] * replace(code[o:end], braces => sqbraces, count=1)
+            if code[min(o+length(a),end)] == '('
+                code = code[1:o-1] * replace(code[o:end], braces => brackets, count=1)
             end
+        end
+    end
+
+    # catch second braces, for arrays of strings, https://regex101.com/r/2WIc50/1
+    rx = r"(\[((?>[^\[\]]++|(?1))*)\])\h*(\(((?>[^\(\)]++|(?1))*)\))"
+    code = replace(code, rx => s"\1[\4]")
+
+    # fix uncompleted ranges in square braces like [1:] and [:1], only simplest variants
+    brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
+    rx = r"\[(.*|)([ ]+|):([ ]+|)(.*|)\]"
+    for m in reverse(collect(eachmatch(brackets, code)))
+        if occursin(rx, m.match)
+            o = m.offset
+            code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
+        end
+    end
+    rx = r"\[(.*):\]"
+    for m in reverse(collect(eachmatch(brackets, code)))
+        if occursin(rx, m.match)
+            o = m.offset
+            code = code[1:o-1] * replace(m.match, rx => s"[\1:lastpos_iZjAcpPokM]") *
+                   code[o+length(m.match):end]
+        end
+    end
+    rx = r"\[:(.*)\]"
+    for m in reverse(collect(eachmatch(brackets, code)))
+        if occursin(rx, m.match)
+            o = m.offset
+            code = code[1:o-1] * replace(m.match, rx => s"[1:\1]") * code[o+length(m.match):end]
         end
     end
     return code
@@ -886,16 +943,17 @@ function collectformat(code)
     # collect all other format strings
     lines = splitonlines(code)
     idx = 100001
-    rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)?\)\h*.*)"mi
+    # https://regex101.com/r/G1uBG2/1
+    rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)*|)(\)\h*.*)"mi
+    #rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)?\)\h*.*)"mi
     for i in 1:length(lines)
         m = match(rx, lines[i])
         if !isnothing(m)
             format[string(idx)] = replace(m.captures[2], r"'\((.*)\)'" => s"\1")
-            lines[i] = m.captures[1] * string(idx) * m.captures[3]
+            lines[i] = m.captures[1] * string(idx) * m.captures[3] * m.captures[4]
             idx += 1
         end
     end
-    #println("FORMATs: $format")
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines), format
 end
 
@@ -939,8 +997,9 @@ function convertformat(formatstrings)
 end
 
 function includeformat(code, format)
-    # https://regex101.com/r/auYywX/1
-    rx = r"^(\h*\d*\h*)(write|read)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)?\))(\h*.*)"mi
+    # https://regex101.com/r/auYywX/3 https://regex101.com/r/AA8YPY/2
+    rx = r"(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
+    #rx = r"^(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
     lines = splitonlines(code)
     for i in 1:length(lines)
         m = match(rx, lines[i])
@@ -971,7 +1030,8 @@ function includeformat(code, format)
 end
 
 function enclosereadwrite(code)
-    rx = r"^\h*\d*\h*(write|read)\h*\(\h*[\*\w]+\h*,[^)]+\).*"mi
+    rx = r"\h*\d*\h*(\bwrite\b|\bread\b)\h*\(\h*[\*\w]+\h*,[^)]+\).*"mi
+    #rx = r"^\h*\d*\h*(\bwrite\b|\bread\b)\h*\(\h*[\*\w]+\h*,[^)]+\).*"mi
     lines, comments = splitoncomment(code)
     for i in 1:length(lines)
         if occursin(rx, lines[i])
@@ -1047,18 +1107,18 @@ end
 
 function markbypattern(patterns, code)
     lines = stripcomments(code)
-    list = splitonlines(lines)
+    lines = splitonlines(lines)
     marked = Set{Int}()
     for rx in patterns
-        for (i,l) in enumerate(list)
-            occursin(rx, l) && push!(marked, i)
+        for i = 1:length(lines)
+            occursin(rx, lines[i]) && push!(marked, i)
         end
     end
     # mark lines with continuations
     marked2 = copy(marked)
     for i in marked
-        while occursin(r",$", list[i]) || occursin(r"&$", list[i]) ||
-              occursin(r"^[ ]{5}[^ ]", list[min(i+1,end)])
+        while occursin(r",$", lines[i]) || occursin(r"&$", lines[i]) ||
+              occursin(r"^[ ]{5}[^ ]", lines[min(i+1,end)])
             push!(marked2, i+=1)
         end
     end
@@ -1103,24 +1163,68 @@ function processselectcase(code)
 end
 
 function processparameters(code)
-    matches = [
+    patterns = [
         r"^\h*parameter\h*\("mi
     ]
-    marked = markbypattern(matches, code)
+    marked = markbypattern(patterns, code)
     lines, comments = splitoncomment(code)
     for i in marked
-        lines[i] = replace(lines[i], matches[1] => s"      ")
+        lines[i] = replace(lines[i], patterns[1] => s"      ")
         lines[i] = replace(lines[i], r"," => s";")
         lines[i] = replace(lines[i], r"\)$" => s"")
         lines[i] = replace(lines[i], r"^     [.+&$]" => "      ")
     end
 
     # TODO: F90 with :: declarations
-    matches = [
+    patterns = [
         r"\h*[^,#]+\h*,\h*parameter\h*::\h*"mi
     ]
 
     lines = map(*, lines, comments)
+    return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
+end
+
+function processdata(code)
+    patterns = [
+        r"^\h*\bdata\b\h*[.\w]+(?:\h*\[\h*\d+\h*\]|)\h*\/"mi
+    ]
+    marked = markbypattern(patterns, code)
+
+    # 'DATA A/1/' -- scalars initializations
+    rx = r"(\b\w+\b(?:\h*\[\h*\d+\h*\]|)\h*)(\/((?>[^,\/\n]*|(?1))*)\/)"mi
+    ss = s"\1 = \3"
+    lines, comments = splitoncomment(code)
+    for i in marked
+        lines[i] = replace(lines[i], rx => ss)
+    end
+    lines = map(*, lines, comments)
+    code1 = foldl((a,b) -> a*'\n'*b, lines)
+
+    replacements = OrderedDict(
+    # DATA statements https://regex101.com/r/Z0neJ8/1 https://regex101.com/r/XAol49/2
+    r"^(\h*)(data\h*)([.\w]+)\h*(\/((?>[^\/,]++|(?3))*)\/)"mi => @s_str("\\1\\3 = \\5"),
+    r"^(\h*)(data\h*)([.\w]+)\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 .= (\\5)"),
+    r"^(\h*)(data\h*)([,.\w]+)\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 = (\\5)"),
+    r"^(\h*)(data\h*)(view\(((?>[^()]++|(?3))*)\))\h*(\/((?>[^\/]++|(?3))*)\/)"mi =>
+        @s_str("\\1\\3 .= (\\6)"),
+    )
+    for rx in replacements
+        code1 = replace(code1, rx)
+    end
+
+    # gather all remaining 'DATA'
+    rx = r"(\b\w+\b\h*)(\/((?>[^\/\n]*|(?1))*)\/)"mi
+    ss = s"\1 .= (\3)"
+    lines, comments = splitoncomment(code1)
+    for i in marked
+        lines[i] = replace(lines[i], rx => ss)
+        lines[i] = replace(lines[i], r"^(\h*)\bdata\b"mi => s"\1")
+        # eat all spaces because of numbers 0.111 222 333
+        #lines[i] = replace(lines[i], r" "mi => s"")
+        #lines[i] = "        " * lines[i]
+    end
+    lines = map(*, lines, comments)
+
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
 end
 
@@ -1139,6 +1243,7 @@ function restorespecialsymbols(code)
     code = replace(code,   r"at_iZjAcpPokM" => "@")
     code = replace(code, r"bang_iZjAcpPokM" => "!")
     code = replace(code, r"GhUtwoap_iZjAcpPokM" => "'")
+    code = replace(code, r"lastpos_iZjAcpPokM" => "end")
     return code
 end
 
@@ -1155,8 +1260,8 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d\d\d)(\h+)continue(.*)$"mi => @s_str("   \\1\\3@label L\\2 \\4"),
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
     # https://regex101.com/r/J5ViSG/1
-    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("     \\1@label L\\2\n\n    \\3\\4"),
-    # array repeating statement https://regex101.com/r/R9g9aU/2
+    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("     \\1@label L\\2\n\n     \\3\\4"),
+    # array repeating statement https://regex101.com/r/R9g9aU/2 for READ/WRITE and DATA
     # complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
     r"\(([^)]+)\(([^()]+)\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
     r"\(([^)]+)\[([^\[\]]+)\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
@@ -1164,11 +1269,6 @@ const multilinereplacements = OrderedDict(
     r"\(([^)]+)\[([^\[\]]+),([^\[\]]+)\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
     r"\(([^)]+)\(([^()]+),([^()]+)\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\2)"),
     r"\(([^)]+)\[([^\[\]]+),([^\[\]]+)\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\2)"),
-    # DATA statements https://regex101.com/r/Z0neJ8/1 https://regex101.com/r/XAol49/2
-    r"^(\h*)(data\h*)([.\w]+)\h*(\/((?>[^\/,]++|(?3))*)\/)"mi => @s_str("\\1\\3 = \\5"),
-    r"^(\h*)(data\h*)([.\w]+)\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 .= (\\5)"),
-    r"^(\h*)(data\h*)([,.\w]+)\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 = (\\5)"),
-    r"^(\h*)(data\h*)(view\(((?>[^()]++|(?3))*)\))\h*(\/((?>[^\/]++|(?3))*)\/)"mi => @s_str("\\1\\3 .= (\\6)"),
 )
 
 const singlewordreplacements = OrderedDict(
@@ -1188,6 +1288,7 @@ const singlewordreplacements = OrderedDict(
     r"(\s+)\.not\.(\s+)"i => s"\1!",
     r"(\s+)\.eq\.(\s+)"i => s"\1==\2",
     r"(\s+)\.ne\.(\s+)"i => s"\1!=\2",
+    r"(\s+)\/=(\s+)"i    => s"\1!=\2",
     r"(\s+)\.le\.(\s+)"i => s"\1<=\2",
     r"(\s+)\.ge\.(\s+)"i => s"\1>=\2",
     r"(\s+)\.gt\.(\s+)"i => s"\1>\2",
@@ -1197,6 +1298,7 @@ const singlewordreplacements = OrderedDict(
     r"(\s+)\.not\.\s*"i => s"\1!",
     r"(\s+)\.eq\.\s*"i => s"\1== ",
     r"(\s+)\.ne\.\s*"i => s"\1!= ",
+    r"(\s+)\/=\s*"i    => s"\1!= ",
     r"(\s+)\.le\.\s*"i => s"\1<= ",
     r"(\s+)\.ge\.\s*"i => s"\1>= ",
     r"(\s+)\.gt\.\s*"i => s"\1> ",
@@ -1206,6 +1308,7 @@ const singlewordreplacements = OrderedDict(
     r"\s*\.not\.\s*"i => s" !",
     r"\s*\.eq\.\s*"i => s" == ",
     r"\s*\.ne\.\s*"i => s" != ",
+    r"\s*\/=\s*"i    => s" != ",
     r"\s*\.le\.\s*"i => s" <= ",
     r"\s*\.ge\.\s*"i => s" >= ",
     r"\s*\.gt\.\s*"i => s" > ",
@@ -1252,8 +1355,8 @@ const singlewordreplacements = OrderedDict(
     #r"(?:\blsame\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"((a,b)->==(uppercase(first(a)),uppercase(b)))\1",
 
     # Custom functions
-    r"(\b[\w_]+\b)\(1:J_LEN\(\1\)\)"i => s"rstrip(\1)",
-    r"\bJ_LEN\b\("i => s"length(",
+    #r"(\b[\w_]+\b)\(1:J_LEN\(\1\)\)"i => s"rstrip(\1)",
+    #r"(?:\bJ_LEN\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip\1)",
 )
 
 # Regex/substitution pairs for replace(). Order matters here.
@@ -1271,6 +1374,8 @@ const replacements = OrderedDict(
     "'" => "\"",
     r"@([^\\])@" => s"'\1'",
     r"@([\\])@" => "'\\\\'",
+    # unescape "\/" in strings
+    r"[\\][\/]" => s"/",
     # Spaces around math operators
     #r"([\*\+\/=])(?=\S)" => s"\1 ",
     #r"(?<=\S)([\*\+\/=])" => s" \1",
