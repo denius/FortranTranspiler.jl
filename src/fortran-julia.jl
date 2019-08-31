@@ -544,7 +544,8 @@ end
 
 function iscontinued(line1, line2)
     if occursin(r"^[^#&]*&\h*(#.*|)$"m, line1) ||  # free-form continuation
-       occursin(r"^     [.+&$\w].*$"m, line2)      # fixed-form startline continuation
+       occursin(r"^     [.+&$\w].*$"m, line2)  ||  # fixed-form startline continuation
+       occursin(r"^[#]", line2)                    # commented out line
         return true
     else
         return false
@@ -840,6 +841,95 @@ function replacedocontinue(code, dolabels, gotolabels)
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
 end
 
+function processifstatements1(code)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : code
+    result = copy(code1)
+
+    rx = r"^(\h{0,4}\d*\h*|)if\h*\(.*"mi
+    for m in reverse(collect(eachmatch(rx, code1)))
+        o = m.offset
+        @show iflength, wothen, s1, s2, ifcond, ifbody, tailcomment = parseifstatement(code1, o)
+        if wothen
+            str = s1 * "if_iZjAcpPokM" * s2 * ifcond
+            if length(s2*ifcond*ifbody) <= 72
+                str *= " " * ifbody * " end " * tailcomment
+            else
+                str *= "\n" * s1 * ifbody * tailcomment * "\nend "
+            end
+        else
+            str = s1 * "if_iZjAcpPokM " * ifcond * "\n"
+        end
+        result = result[1:o-1] * str * result[o+iflength:end]
+    end
+
+    return code isa AbstractVector ? split(result, '\n') : result
+end
+
+function parseifstatement(str, position)
+    reflabel = ""
+    iftaken = false
+    condtaken = false
+    countervar = "to save from GC"
+    inbraces  = 0
+    nextarg = 0
+    starts = [0,0,0]
+
+    while true
+        ttype = picktoken(str, position)
+        if ttype == 'e'
+            break
+        elseif ttype == ' '
+            @error("unexpected token")
+            position = skipspaces(str, position)
+        elseif ttype == 'n'
+            position = skipnewline(str, position)
+        elseif ttype == '#'
+            position = skipcomment(str, position)
+        elseif ttype == '&'
+            if picknexttoken(str, position) == '#' ||
+               picknexttoken(str, position) == 'n'
+                linecontinued = true
+            else
+                linecontinued = false
+            end
+            position = skiptoken(str, position)
+        elseif !iftaken && ttype == 'd'
+            reflabel, position = taketoken(str, position)
+        elseif !iftaken && ttype == 'l'
+            lex, position = taketoken(str, position)
+            if lowercase(lex) != "if"
+                # it is not an "if"
+                return 0,false,"","","","","","",""
+            else
+                iftaken = true
+            end
+        elseif ttype == '('
+            inbraces += 1
+            position = skiptoken(str, position)
+        elseif ttype == ')'
+            inbraces -= 1
+            position = skiptoken(str, position)
+            if inbraces == 0 && !condtaken
+                condtaken = true
+            end
+        else
+            position = skiptoken(str, position)
+        end
+    end
+
+    if starts[1] == 0 || starts[2] == 0
+        return false,"","","","","","",""
+    elseif starts[3] == 0
+        starts[3] = position+1
+    end
+
+    return true, reflabel, label, countervar,
+           strip(str[starts[1]:starts[2]-2]),
+           strip(str[starts[2]:starts[3]-2]),
+           strip(str[starts[3]:position-1]),
+           str[position:end] # possible trailing comment
+end
+
 function processifstatements(code)
     # https://stackoverflow.com/questions/36357344/how-to-match-paired-closing-bracket-with-regex
     # https://regex101.com/r/ENCs20/3
@@ -899,11 +989,11 @@ function replacearraysbrackets(code, arrays)
             code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
         end
     end
-    rx = r"\[(.*):\]"
+    rx = r"\[(.*):(,.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
-            code = code[1:o-1] * replace(m.match, rx => s"[\1:lastpos_iZjAcpPokM]") *
+            code = code[1:o-1] * replace(m.match, rx => s"[\1:lastpos_iZjAcpPokM\2]") *
                    code[o+length(m.match):end]
         end
     end
@@ -1118,11 +1208,22 @@ function markbypattern(patterns, code)
     marked2 = copy(marked)
     for i in marked
         while occursin(r",$", lines[i]) || occursin(r"&$", lines[i]) ||
+              occursin(r"^$", lines[i]) || # full comment-line can occur inside the declaration lines
               occursin(r"^[ ]{5}[^ ]", lines[min(i+1,end)])
             push!(marked2, i+=1)
         end
     end
     return sort(collect(marked2))
+end
+
+function markcontinued(code, i)
+    lines = splitonlines(code)
+    marked = [i]
+    # mark lines with continuations
+    while i < length(lines) && iscontinued(lines[i], lines[i+1])
+        push!(marked, i+=1)
+    end
+    return marked
 end
 
 function processselectcase(code)
@@ -1191,7 +1292,7 @@ function processdata(code)
     marked = markbypattern(patterns, code)
 
     # 'DATA A/1/' -- scalars initializations
-    rx = r"(\b\w+\b(?:\h*\[\h*\d+\h*\]|)\h*)(\/((?>[^,\/\n]*|(?1))*)\/)"mi
+    rx = r"(\b\w+\b(?:\h*\[\h*\d+\h*\]|)\h*)(\/((?>[^,\/\n*#]*|(?1))*)\/)"mi
     ss = s"\1 = \3"
     lines, comments = splitoncomment(code)
     for i in marked
@@ -1213,15 +1314,14 @@ function processdata(code)
     end
 
     # gather all remaining 'DATA'
-    rx = r"(\b\w+\b\h*)(\/((?>[^\/\n]*|(?1))*)\/)"mi
+    rx = r"(\b\w+\b\h*)(\/((?>[^\/\n#]*|(?1))*)\/)"mi
     ss = s"\1 .= (\3)"
     lines, comments = splitoncomment(code1)
     for i in marked
         lines[i] = replace(lines[i], rx => ss)
         lines[i] = replace(lines[i], r"^(\h*)\bdata\b"mi => s"\1")
-        # eat all spaces because of numbers 0.111 222 333
-        #lines[i] = replace(lines[i], r" "mi => s"")
-        #lines[i] = "        " * lines[i]
+        # eat spaces in the numbers 0.111 222 333
+        lines[i] = replace(lines[i], r"([^ \[=]) ([^ ])"mi => s"\1\2")
     end
     lines = map(*, lines, comments)
 
@@ -1337,6 +1437,7 @@ const singlewordreplacements = OrderedDict(
     r"\bint\b\h*\("i => "trunc(Int,",
     r"\breal\b\h*\("i => "Float32(", # ?
     r"\bfloat\b\h*\("i => "Float32(", # ?
+    r"\bsngl\b\h*\("i => "Float32(", # ?
     r"\bdble\b\h*\("i => "float(",
     r"\bdfloat\b\h*\("i => "float(",
     r"\bcmplx\b\h*\("i => "ComplexF32(", # ?
