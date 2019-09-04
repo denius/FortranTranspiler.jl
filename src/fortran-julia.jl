@@ -194,11 +194,10 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         for rx in replacements
             lines = map(a->replace(a, rx), lines)
         end
+        #write("test.jl", foldl((a,b) -> a*'\n'*b, lines))
 
         # append comments back
         lines = map(*, lines, comments)
-
-        #write("test.jl", foldl((a,b) -> a*'\n'*b, lines))
 
         lines = includeformat(lines, formats)
 
@@ -430,12 +429,14 @@ function commentoutdeclarations(code)
         r"^\h*integer.*::"mi,
         r"^\h*integer\h+(?!.*function)"mi,
         r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*integer\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
         r"^\h*character.*::"mi,
         r"^\h*character\h+(?!.*function)"mi,
         r"^\h*character\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
         r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
         r"^\h*character\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
         r"^\h*character\*\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\*\h*\([\h\w_*+-]+\)\h*(?!.*function)"mi,
         r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*external\h+"mi,
         r"^\h*logical.*::"mi,
@@ -462,11 +463,13 @@ function collectvars(code)
         r"^\h*dimension\h+"mi,
         r"^\h*real\h+(?!.*function)"mi,
         r"^\h*real\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*real\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
         r"^\h*double\h+precision\h+(?!.*function)"mi,
         r"^\h*complex\h+(?!.*function)"mi,
         r"^\h*complex\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*integer\h+(?!.*function)"mi,
         r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*integer\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
         r"^\h*logical\h+(?!.*function)"mi,
         r"^\h*character\h+"mi,
         r"^\h*character\*\h+"mi
@@ -506,7 +509,7 @@ function collectvars(code)
                r"^\h*character\(\d+\)\h*"mi,
                r"^\h*character\(\*\)\h*"mi,
                r"^\h*character\*\(\*\)\h*"mi,
-               r"^\h*character\*\(\d+\)\h*"mi ]
+               r"^\h*character\*\([\h\w_*+-]+\)\h*"mi ]
     for rx in patterns
         for l in lines
             if occursin(rx, l)
@@ -686,25 +689,26 @@ end
 function processifstatements(code)
     code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
 
-    rx = r"^(\h{0,4}\d*\h*|)if\h*\(.*"mi
+    rx = r"^(\h{0,4}\d*\h*|)(else|)\h*if\h*\(.*"mi
+    #rx = r"^(\h{0,4}\d*\h*|)if\h*\(.*"mi
     for (i,m) in enumerate(reverse(collect(eachmatch(rx, code1))))
         o = m.offset
         s1 = replace(m.match, rx => s"\1")
-        iflength, wothen, ifcond, ifexec, tailcomment = parseifstatement(code1, o)
-        #@show o, iflength, ifcond, ifexec, tailcomment
+        s2 = lowercase(replace(m.match, rx => s"\2"))
+        iflength, wothen, ifcond, ifexec, afterthencomment = parseifstatement(code1, o)
+        length(ifexec) > 0 && isletter(ifexec[1]) && (ifexec = " " * ifexec)
+        length(afterthencomment) > 0 && (afterthencomment = " " * afterthencomment)
+        #@show o, iflength, ifcond, ifexec, afterthencomment
         if wothen == true
-            str = s1 * "if_iZjAcpPokM" * "(" * ifcond * ")"
-            if onelined(ifcond) && onelined(ifexec) # && length(s1*ifcond*ifexec) <= 72
-                l, c = splitoncomment(ifexec)
-                str *= " " * strip(l[1]) * " end " * tailcomment * " " * c[1]
-                #str *= " " * strip(ifexec) * " end " * tailcomment
+            str = s1 * s2 * "if_iZjAcpPokM (" * strip(ifcond) * ")"
+            if isoneline(ifcond) && isoneline(ifexec)
+                # insert "end" before comment or at tail
+                str *= replace(ifexec, r"^\h*([^#]*)\h*(#.*|)$" => s" \1 end \2")
             else
-                str *= ifexec * " " * tailcomment * "\n" * " "^length(s1) * "end "
+                str *= ifexec * "\n" * " "^length(s1) * "end "
             end
         elseif wothen == false
-            str = s1 * "if_iZjAcpPokM " * strip(ifcond) * (length(tailcomment) > 0 ? " " * tailcomment : "")
-            #str = s1 * "if_iZjAcpPokM " * ifcond * " " * tailcomment
-            #str = s1 * "if_iZjAcpPokM " * ifcond * " " * tailcomment * "\n"
+            str = s1 * s2 * "if_iZjAcpPokM " * strip(ifcond) * afterthencomment
         else
             str = ""
         end
@@ -718,7 +722,7 @@ end
 function parseifstatement(str, position)
     position0 = position
     reflabel = ""
-    tailcomment = ""
+    afterthencomment = ""
     iftaken = false
     wothen = nothing
     startcond = startexec = 0
@@ -737,19 +741,22 @@ function parseifstatement(str, position)
             reflabel, position = taketoken(str, position)
         elseif !iftaken && ttype == 'l'
             lex, position = taketoken(str, position)
-            if lowercase(lex) == "if"
+            if lowercase(lex) == "else"
+                lex, position = taketoken(str, skipspaces(str, position))
+            end
+            if lowercase(lex) == "if" || lowercase(lex) == "elseif"
                 iftaken = true
             else
                 # that is not an "if" statement
                 return 0, wothen, "", "", ""
             end
         elseif iftaken && inbraces == 0 && ttype == 'l'
-            #startexec = position
             lex, position = taketoken(str, position)
             if lowercase(lex) == "then"
                 wothen = false
+                position = skipspaces(str, position)
                 if picktoken(str, position) == '#'
-                    tailcomment = str[position:(position = skipcomment(str, position))-1]
+                    afterthencomment = str[position:(position = skipcomment(str, position))-1]
                 end
                 break
             else
@@ -773,9 +780,9 @@ function parseifstatement(str, position)
         end
     end
 
-    #@show startcond, endcond, startexec, endexec, tailcomment
-    return position-position0, wothen, str[startcond:endcond], str[startexec:endexec], tailcomment
-    #return position-position0, wothen, strip(str[startcond:endcond]), str[startexec:endexec], tailcomment
+    #@show startcond, endcond, startexec, endexec, afterthencomment
+    return position-position0, wothen, str[startcond:endcond], str[startexec:endexec], afterthencomment
+    #return position-position0, wothen, strip(str[startcond:endcond]), str[startexec:endexec], afterthencomment
 end
 
 function picktoken(str, i)
@@ -946,7 +953,7 @@ skiptoken(str, i)     =  marktoken(str, i)[3]
 skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : i
 skipspaces(str, i)    = catchspaces(str, i)[2] + 1
 skipcomment(str, i)   = catchcomment(str, i)[2] + 1
-onelined(str)         = !('\n' in str)
+isoneline(str)        = !('\n' in str)
 
 function skipwhitespaces(str, i)
     eos() = i>len; len = length(str)
@@ -1034,9 +1041,10 @@ function processconditionalgotos(code)
             var = replace(str, rxfull => s"\3")
             ifexpr = "" * head
             for (i,g) = enumerate(gotos)
-                ifexpr *= "if ($(var) == $(i))\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
+                ifexpr *= "if ($(var) .eq. $(i)) then\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
+                #ifexpr *= "if ($(var) == $(i))\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
             end
-            ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label $(var) in goto list\")\n$(head)end\n"
+            ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label $(var)=\\'\$($(var))\\' in goto list\")\n$(head)end\n"
             #println("ifexpr: $ifexpr")
             insert!(lines, i, ifexpr)
         end
@@ -1642,17 +1650,9 @@ const replacements = OrderedDict(
     # Replace do while -> while
     r"do\h+while"i => s"while",
     r"^(\h*)\bdo\b\h*$"i => s"\1while true",
-    # Replace ELSEIF/ELSE IF with elseif
-    r"^(\s*)else\s*if"mi => s"\1elseif",
-    # Replace "IF(" to "if ("
-    r"^(\s*)(elseif|if)\("mi => s"\1\2 (",
-    # Remove THEN
-    r"([)\s])then(\s*)"i => s"\1\2",
-    # Replace IF with if
-    r"^(\s*)\bIF\b"m => s"\1if",
     # Replace ELSE with else
-    #r"^(\s*)ELSE(?=\W)"m => s"\1else",
-    r"^(\s*)ELSE"m => s"\1else",
+    #r"^(\s*)ELSE"m => s"\1else",
+    r"^(\s*)\bELSE\b"m => s"\1else",
     # Relace END XXXX with end
     r"^(\h*)end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|do|if|select)\h*\w*$"mi => s"\1end",
     r"^(\h*)END$"mi => s"\1end",
@@ -1683,7 +1683,7 @@ const replacements = OrderedDict(
     r"\bstop\b"mi => s"exit(1)",
     r"//" => " * ",
     # Format floats as "5.0" not "5."
-    r"(\W\d+)\.(\D)" => s"\1.0\2",
+    r"(\W\d+)\.(?=\D)" => s"\1.0",
     r"(\W\d+)\.$"m => s"\1.0",
     r"(?<=\W)\.(\d+)"m => s"0.\1",
     # Floats: 0E0 -> 0.0f+0, 0D0 -> 0.0e+0
@@ -1695,8 +1695,8 @@ const replacements = OrderedDict(
     r"(\W)go\h*to\s+(\d+)"mi => s"\1 @goto L\2",
     # fix end
     r"^(.+[^ ])[ ]([ ]+)end$" => s"\1 end\2",
-    # remove whitespace between function name and left brace https://regex101.com/r/CxV232/2
-    r"(\b(?!if)[\w_]+\b)[\h]+\("i => s"\1(",
+    # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
+    r"(\b(?!elseif|if)[\w_]+\b)[\h]+\("i => s"\1(",
     # Relace suberror with error and mark for fixup
     r"(\W)suberror\((.*?),.*?\)" => s"\1 error(\2)",
     # Mark #FIXME the various things this script can't handle
