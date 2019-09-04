@@ -15,10 +15,14 @@ using DataStructures, Printf, JuliaFormatter
     * due to julia's GC, some variables initialized inside the loop/if blocks may disappear
       upon they exit these blocks. Consider initilizing them with the appropriate value in
       the initial part of the function code.
+    * all strings in fortran are `Vector{Char}` and should stay same type to preserve
+      assignment statements. (use `join` and `collect` to convert to strings and back)
     * whitespaces matter despite of the old fortran, which can ignore them all:
-    ** in julia whitespaces between function/array names and braces are not allowed.
-    * some unserviceable comments are cutted (eg. in expanded lines continuations).
-    * this script is mostly for fixed-form fortran and free-form is not tested.
+    ** in julia whitespaces between name of functions/arrays and braces are not allowed.
+    * julia can't propagate back changed values of scalars via functions args, unlike fortran.
+      Thus such changed scalars should be returned via functions `return` statement.
+    * some unserviceable comments are cutted off (eg. in expanded lines continuations).
+    * this script is mostly for fixed-form fortran and free-form is not tested yet.
     * in the `DATA` statement can occur uncatched repetitions like `DATA SOMEARRAY/8*0,1,2/`
     * `READ`/`WRITE` is ugly
     * `FORMAT` is incorrect sometimes
@@ -49,17 +53,21 @@ function printusage()
         fortran-julia.jl **/*.[fF]*
 
     Options:
-        -h, --help      Show this screen.
-        --version       Show version.
-        -q, --quiet     Suppress all console output.
-        -v, --verbose   Be verbose.
-        -v, --verbose   Be more verbose.
-        --uppercase     Convert all identifiers to upper case.
-        --lowercase     Convert all identifiers to lower case.
-        --greeks        Replace part of vars names with greeks unicode symbols like δ1.
-        --subscripts    Replace SOMEVAR_??? suffixes of vars names with unicode subscripts, if exist.
-        --              The rest of the args are only filenames.
-        --formatting    You have luck enough.
+        -h, --help       Show this screen.
+        --version        Show version.
+        -q, --quiet      Suppress all console output.
+        -v, --verbose    Be verbose.
+        -v, --verbose    Be more verbose.
+        --uppercase      Convert all identifiers to upper case.
+        --lowercase      Convert all identifiers to lower case.
+        --greeks         Replace the greeks letters names thats starts the vars names
+                         with corresponding unicode symbols, like DELTA1 -> δ1.
+        --subscripts     Replace tail suffixes in vars names like SOMEVAR_? with unicode subscripts, if exist.
+        --               The rest of the args is only the filenames.
+        --formatting     Try to format with JuliaFormatter package.
+        --returnnothing
+        --packarrays
+        --strings
 ")
 end
 
@@ -88,6 +96,8 @@ function main(args)
     return nothing
 end
 
+isfixedformfortran = true
+
 function convertfromfortran(code; casetransform=identity, quiet=true,
                             verbose=false, veryverbose=false)
 
@@ -103,7 +113,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     # replace 'PRINT' => 'WRITE'
     code = replace(code, r"(print)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)")
 
-    isfixedformfortran = !occursin(r"^[^cC*!\n][^\n]{0,3}[^\d\h\n]"m, code)
+    global isfixedformfortran = !occursin(r"^[^cC*!\n][^\n]{0,3}[^\d\h\n]"m, code)
 
     code = savespecialsymbols(code)
 
@@ -231,14 +241,18 @@ function parse_args(lines)
 
     fnames = Vector{String}()
     args = OrderedDict{String, Any}()
-    args["--quiet"]       = args["-q"]  = false
-    args["--verbose"]     = args["-v"]  = false
-    args["--veryverbose"] = args["-vv"] = false
-    args["--uppercase"]   = false
-    args["--lowercase"]   = false
-    args["--greeks"]      = false
-    args["--subscripts"]  = false
-    args["--formatting"]  = false
+    args["--quiet"]         = args["-q"]  = false
+    args["--verbose"]       = args["-v"]  = false
+    args["--veryverbose"]   = args["-vv"] = false
+    args["--uppercase"]     = false
+    args["--lowercase"]     = false
+    args["--greeks"]        = false
+    args["--subscripts"]    = false
+    args["--formatting"]    = false
+    args["--returnnothing"] = false
+    args["--packarrays"]    = false
+    args["--strings"]       = false
+    #args["--"]  = false
 
     while length(lines) > 0
         if first(args) == "--help" || first(args) == "-h"
@@ -418,6 +432,7 @@ function commentoutdeclarations(code)
         r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*character.*::"mi,
         r"^\h*character\h+(?!.*function)"mi,
+        r"^\h*character\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
         r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
         r"^\h*character\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
         r"^\h*character\*\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
@@ -489,6 +504,7 @@ function collectvars(code)
                r"^\h*character\*\h+"mi,
                r"^\h*character\*\d+\h+"mi,
                r"^\h*character\(\d+\)\h*"mi,
+               r"^\h*character\(\*\)\h*"mi,
                r"^\h*character\*\(\*\)\h*"mi,
                r"^\h*character\*\(\d+\)\h*"mi ]
     for rx in patterns
@@ -544,8 +560,8 @@ end
 
 function iscontinued(line1, line2)
     if occursin(r"^[^#&]*&\h*(#.*|)$"m, line1) ||  # free-form continuation
-       occursin(r"^     [.+&$\w].*$"m, line2)  ||  # fixed-form startline continuation
-       occursin(r"^[#]", line2)                    # commented out line
+       occursin(r"^     [.+&$\w].*$"m, line2)  #=||  # fixed-form startline continuation
+       occursin(r"^[#]", line2)                  =#  # commented out line
         return true
     else
         return false
@@ -600,10 +616,13 @@ function parsedostatement(line)
 
     while true
         ttype = picktoken(line, position)
+        #print("_$ttype")
         if ttype == 'e' || ttype == '#'
             break
-        elseif ttype == ' ' && picknexttoken(line, position) == '#'
-            break #position = skipspaces(line, position)
+        elseif ttype == ' '
+            position = skipspaces(line, position)
+        #elseif ttype == '#'
+        #    break #position = skipspaces(line, position)
         elseif nextarg == 0 && ttype == 'd'
             reflabel, position = taketoken(line, position)
         elseif nextarg == 0 && ttype == 'l'
@@ -629,7 +648,10 @@ function parsedostatement(line)
                 return false,"","","","","","",""
             end
             position = skipspaces(line, position)
-            @assert picktoken(line, position) == '='
+            if picktoken(line, position) != '='
+                # it is not the 'DO' statement
+                return false,"","","","","","",""
+            end
             position = skiptoken(line, position)
             starts[nextarg+=1] = position
         elseif ttype == '('
@@ -661,13 +683,108 @@ function parsedostatement(line)
            line[position:end] # possible trailing comment
 end
 
+function processifstatements(code)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
+
+    rx = r"^(\h{0,4}\d*\h*|)if\h*\(.*"mi
+    for (i,m) in enumerate(reverse(collect(eachmatch(rx, code1))))
+        o = m.offset
+        s1 = replace(m.match, rx => s"\1")
+        iflength, wothen, ifcond, ifexec, tailcomment = parseifstatement(code1, o)
+        #@show o, iflength, ifcond, ifexec, tailcomment
+        if wothen == true
+            str = s1 * "if_iZjAcpPokM" * "(" * ifcond * ")"
+            if onelined(ifcond) && onelined(ifexec) # && length(s1*ifcond*ifexec) <= 72
+                l, c = splitoncomment(ifexec)
+                str *= " " * strip(l[1]) * " end " * tailcomment * " " * c[1]
+                #str *= " " * strip(ifexec) * " end " * tailcomment
+            else
+                str *= ifexec * " " * tailcomment * "\n" * " "^length(s1) * "end "
+            end
+        elseif wothen == false
+            str = s1 * "if_iZjAcpPokM " * strip(ifcond) * (length(tailcomment) > 0 ? " " * tailcomment : "")
+            #str = s1 * "if_iZjAcpPokM " * ifcond * " " * tailcomment
+            #str = s1 * "if_iZjAcpPokM " * ifcond * " " * tailcomment * "\n"
+        else
+            str = ""
+        end
+        code1 = code1[1:o-1] * str * code1[o+iflength:end]
+    end
+
+    code1 = replace(code1, r"if_iZjAcpPokM" => "if")
+    return code isa AbstractVector ? split(code1, '\n') : code1
+end
+
+function parseifstatement(str, position)
+    position0 = position
+    reflabel = ""
+    tailcomment = ""
+    iftaken = false
+    wothen = nothing
+    startcond = startexec = 0
+    endcond = endexec = -1
+    inbraces  = 0
+
+    while true
+        ttype = picktoken(str, position)
+        #print("_$ttype")
+        #@show ttype, iftaken, inbraces, startcond, endcond, startexec, endexec
+        if ttype == 'e' || ttype == '\n'
+            break
+        elseif ttype == ' '
+            position = skipspaces(str, position)
+        elseif !iftaken && ttype == 'd'
+            reflabel, position = taketoken(str, position)
+        elseif !iftaken && ttype == 'l'
+            lex, position = taketoken(str, position)
+            if lowercase(lex) == "if"
+                iftaken = true
+            else
+                # that is not an "if" statement
+                return 0, wothen, "", "", ""
+            end
+        elseif iftaken && inbraces == 0 && ttype == 'l'
+            #startexec = position
+            lex, position = taketoken(str, position)
+            if lowercase(lex) == "then"
+                wothen = false
+                if picktoken(str, position) == '#'
+                    tailcomment = str[position:(position = skipcomment(str, position))-1]
+                end
+                break
+            else
+                wothen = true
+                endexec = position = skipupto('\n', str, position)
+                endexec -= 1
+            end
+        elseif ttype == '('
+            inbraces += 1
+            position = skiptoken(str, position)
+            startcond == 0 && (startcond = position)
+        elseif ttype == ')'
+            inbraces -= 1
+            if inbraces == 0 && endcond == -1
+                endcond = position-1
+                startexec = position + 1
+            end
+            position = skiptoken(str, position)
+        else
+            position = skiptoken(str, position)
+        end
+    end
+
+    #@show startcond, endcond, startexec, endexec, tailcomment
+    return position-position0, wothen, str[startcond:endcond], str[startexec:endexec], tailcomment
+    #return position-position0, wothen, strip(str[startcond:endcond]), str[startexec:endexec], tailcomment
+end
+
 function picktoken(str, i)
     islbrace(c::AbstractChar) = c=='(' || c=='['
     isrbrace(c::AbstractChar) = c==')' || c==']'
     len = length(str)
     i > len && return 'e'
     c = str[i]
-    if isspace(c)
+    if isspace(c) && c != '\n'
         return ' '
     elseif islbrace(c)
         return '('
@@ -677,6 +794,10 @@ function picktoken(str, i)
         return 'd'
     elseif isletter(c)
         return 'l'
+    elseif c == '\n' && catchcontinuedlines(str, i)[1]
+        return ' '
+    elseif c == '\n'
+        return 'e'
     else
         return c
     end
@@ -716,10 +837,84 @@ function catchtoken(str, i)
         end
     end
 end
+function catchspaces(str, i)
+    eos() = i>len; len = length(str)
+    eos() && return len, len-1
+    start = i
+    while !eos() && isspace(str[i])
+        if str[i] != '\n'
+            i += 1
+        else
+            catched, _, iend = catchcontinuedlines(str, i)
+            if catched
+                i = iend + 1
+            else
+                break
+            end
+        end
+    end
+    return start, i-1
+end
+function catchcomment(str, i)
+    eos() = i>len; len = length(str)
+    eos() && return len, len-1
+    start = i
+    while !eos() && str[i] != '\n'
+            i += 1
+    end
+    return start, i-1
+end
+function catchcontinuedlines(str, i)
+    eos() = i>len; len = length(str)
+    eos() && return false, len, len-1
+    str[i] != '\n' && return false, i, i-1
+    if isfixedformfortran && len>i+6 && str[i+1:i+5] == "     " && str[i+6] != ' '
+        return true, i, i+6
+    elseif !isfixedformfortran && iscontinuedlinefreeform(str, i)
+        # look behind for '&' at end of line
+        return true, i, i
+    else
+        return false, i, i-1
+    end
+end
+
+function iscontinuedlinefreeform(str, i)
+    len = i
+    while len < length(str) && str[len] !='\n'
+        len += 1
+    end
+    # look from start of line
+    while i>1 && str[i-1] !='\n'
+        i -= 1
+    end
+    while i <= len
+        if str[i] == ' '
+            i = skipwhitespaces(str, i)
+        elseif str[i] == '''
+            i = skiptoken(str, i)
+        elseif str[i] == '#'
+            return false
+        elseif str[i] == '&'
+            t, i = '&', i+1
+            i = skipwhitespaces(str, i)
+            if i > length(str) || str[i] == '#' || str[i] == '\n'
+                return true
+            elseif str[i] == '&' # catch "&&" operator
+                i += 1
+            else
+                @error("unexpected '$(str[i])' after '$(t)'")
+                i = skiptoken(str, i)
+            end
+        else
+            i = skiptoken(str, i)
+        end
+    end
+    return false
+end
 
 function marktoken(str, i)
     len = length(str)
-    i > len && return "", len+1
+    i > len && return len, len-1, len+1
     ttype = picktoken(str, i)
     if ttype == 'l'      # catch keywords and identifiers
         startpos, endpos = catchtokenvar(str, i)
@@ -727,10 +922,21 @@ function marktoken(str, i)
     elseif ttype == '''  # strings
         startpos, endpos = catchtokenstring(str, i)
         return startpos, endpos, endpos + 2
+    elseif ttype == ' '  # catch spaces
+        startpos, endpos = catchspaces(str, i)
+        return startpos, endpos, endpos + 1
+    elseif ttype == '#'  # catch comment
+        startpos, endpos = catchcomment(str, i)
+        return startpos, endpos, endpos + 1
     #elseif ttype == 'd'  # catch integer|float numbers
-    else                 # all other tokens
+    elseif ttype == 'd'  # catch integer number
         startpos, endpos = catchtoken(str, i)
         return startpos, endpos, endpos + 1
+    elseif ttype == '*'  # catch '**' operator
+        startpos, endpos = catchtoken(str, i)
+        return startpos, endpos, endpos + 1
+    else                 # all other tokens should be singles
+        return i, i, i + 1
     end
 end
 
@@ -738,15 +944,43 @@ taketoken(str, i)     =  ( (p1,p2,p3) -> (str[p1:p2], p3) )(marktoken(str, i)...
 picknexttoken(str, i) =  picktoken(str, marktoken(str, i)[3])
 skiptoken(str, i)     =  marktoken(str, i)[3]
 skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : i
+skipspaces(str, i)    = catchspaces(str, i)[2] + 1
+skipcomment(str, i)   = catchcomment(str, i)[2] + 1
+onelined(str)         = !('\n' in str)
 
-function skipspaces(str, i)
+function skipwhitespaces(str, i)
     eos() = i>len; len = length(str)
     eos() && return len+1
-    while !eos() && isspace(str[i])
+    while !eos() && str[i] == ' '
         i += 1
     end
     return i
 end
+
+function skipupto(c, str, i)
+    eos() = i>len; len = length(str)
+    while true
+        eos() && return len+1
+        if str[i] == ''' != c # skip string
+            i = skiptoken(str, i)
+        elseif str[i] == c == '\n'
+            catched, _, iend = catchcontinuedlines(str, i)
+            if catched
+                i = iend + 1
+            else
+                break
+            end
+        elseif str[i] == '#' != c
+            i = skipcomment(str, i)
+        elseif str[i] == c
+            break
+        else
+            i += 1
+        end
+    end
+    return i
+end
+
 
 function collectlabels(code)
     code1 = stripcomments(code)
@@ -842,95 +1076,6 @@ function replacedocontinue(code, dolabels, gotolabels)
 end
 
 function processifstatements1(code)
-    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : code
-    result = copy(code1)
-
-    rx = r"^(\h{0,4}\d*\h*|)if\h*\(.*"mi
-    for m in reverse(collect(eachmatch(rx, code1)))
-        o = m.offset
-        @show iflength, wothen, s1, s2, ifcond, ifbody, tailcomment = parseifstatement(code1, o)
-        if wothen
-            str = s1 * "if_iZjAcpPokM" * s2 * ifcond
-            if length(s2*ifcond*ifbody) <= 72
-                str *= " " * ifbody * " end " * tailcomment
-            else
-                str *= "\n" * s1 * ifbody * tailcomment * "\nend "
-            end
-        else
-            str = s1 * "if_iZjAcpPokM " * ifcond * "\n"
-        end
-        result = result[1:o-1] * str * result[o+iflength:end]
-    end
-
-    return code isa AbstractVector ? split(result, '\n') : result
-end
-
-function parseifstatement(str, position)
-    reflabel = ""
-    iftaken = false
-    condtaken = false
-    countervar = "to save from GC"
-    inbraces  = 0
-    nextarg = 0
-    starts = [0,0,0]
-
-    while true
-        ttype = picktoken(str, position)
-        if ttype == 'e'
-            break
-        elseif ttype == ' '
-            @error("unexpected token")
-            position = skipspaces(str, position)
-        elseif ttype == 'n'
-            position = skipnewline(str, position)
-        elseif ttype == '#'
-            position = skipcomment(str, position)
-        elseif ttype == '&'
-            if picknexttoken(str, position) == '#' ||
-               picknexttoken(str, position) == 'n'
-                linecontinued = true
-            else
-                linecontinued = false
-            end
-            position = skiptoken(str, position)
-        elseif !iftaken && ttype == 'd'
-            reflabel, position = taketoken(str, position)
-        elseif !iftaken && ttype == 'l'
-            lex, position = taketoken(str, position)
-            if lowercase(lex) != "if"
-                # it is not an "if"
-                return 0,false,"","","","","","",""
-            else
-                iftaken = true
-            end
-        elseif ttype == '('
-            inbraces += 1
-            position = skiptoken(str, position)
-        elseif ttype == ')'
-            inbraces -= 1
-            position = skiptoken(str, position)
-            if inbraces == 0 && !condtaken
-                condtaken = true
-            end
-        else
-            position = skiptoken(str, position)
-        end
-    end
-
-    if starts[1] == 0 || starts[2] == 0
-        return false,"","","","","","",""
-    elseif starts[3] == 0
-        starts[3] = position+1
-    end
-
-    return true, reflabel, label, countervar,
-           strip(str[starts[1]:starts[2]-2]),
-           strip(str[starts[2]:starts[3]-2]),
-           strip(str[starts[3]:position-1]),
-           str[position:end] # possible trailing comment
-end
-
-function processifstatements(code)
     # https://stackoverflow.com/questions/36357344/how-to-match-paired-closing-bracket-with-regex
     # https://regex101.com/r/ENCs20/3
     rx1 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))\h*((?!.*then)[^#\n]+(?!.*\n[ ]{5}[^ ][^\n]+))"mi
@@ -1360,7 +1505,7 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d\d\d)(\h+)continue(.*)$"mi => @s_str("   \\1\\3@label L\\2 \\4"),
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
     # https://regex101.com/r/J5ViSG/1
-    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("     \\1@label L\\2\n\n     \\3\\4"),
+    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n\n     \\3\\4"),
     # array repeating statement https://regex101.com/r/R9g9aU/2 for READ/WRITE and DATA
     # complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
     r"\(([^)]+)\(([^()]+)\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
@@ -1496,6 +1641,7 @@ const replacements = OrderedDict(
     r"for\h+(?:\d+)(\h+.*)$" => s"for\1",
     # Replace do while -> while
     r"do\h+while"i => s"while",
+    r"^(\h*)\bdo\b\h*$"i => s"\1while true",
     # Replace ELSEIF/ELSE IF with elseif
     r"^(\s*)else\s*if"mi => s"\1elseif",
     # Replace "IF(" to "if ("
@@ -1508,7 +1654,7 @@ const replacements = OrderedDict(
     #r"^(\s*)ELSE(?=\W)"m => s"\1else",
     r"^(\s*)ELSE"m => s"\1else",
     # Relace END XXXX with end
-    r"^(\h*)end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|do|if)\h*\w*$"mi => s"\1end",
+    r"^(\h*)end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|do|if|select)\h*\w*$"mi => s"\1end",
     r"^(\h*)END$"mi => s"\1end",
     # Don't need CALL
     r"([^ ])\bcall\b(\h+)"i => s"\1 ",
