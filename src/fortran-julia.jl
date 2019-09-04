@@ -676,9 +676,10 @@ function parsedostatement(line)
     if starts[1] == 0 || starts[2] == 0
         return false,"","","","","","",""
     elseif starts[3] == 0
-        starts[3] = position+1
+        starts[3] = position + 1
     end
 
+    # cross our fingers to have simple ascii without multibyte characters
     return true, reflabel, label, countervar,
            strip(line[starts[1]:starts[2]-2]),
            strip(line[starts[2]:starts[3]-2]),
@@ -690,7 +691,6 @@ function processifstatements(code)
     code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
 
     rx = r"^(\h{0,4}\d*\h*|)(else|)\h*if\h*\(.*"mi
-    #rx = r"^(\h{0,4}\d*\h*|)if\h*\(.*"mi
     for (i,m) in enumerate(reverse(collect(eachmatch(rx, code1))))
         o = m.offset
         s1 = replace(m.match, rx => s"\1")
@@ -712,7 +712,7 @@ function processifstatements(code)
         else
             str = ""
         end
-        code1 = code1[1:o-1] * str * code1[o+iflength:end]
+        code1 = code1[1:prevind(code1,o)] * str * code1[thisind(code1,o+iflength):end]
     end
 
     code1 = replace(code1, r"if_iZjAcpPokM" => "if")
@@ -754,9 +754,11 @@ function parseifstatement(str, position)
             lex, position = taketoken(str, position)
             if lowercase(lex) == "then"
                 wothen = false
-                position = skipspaces(str, position)
-                if picktoken(str, position) == '#'
-                    afterthencomment = str[position:(position = skipcomment(str, position))-1]
+                if picktoken(str, skipwhitespaces(str, position)) == '#'
+                    afterthencomment = str[position:prevind(str, (position = skipcomment(str, skipwhitespaces(str,position)))...)]
+                else
+                    position = skipwhitespaces(str, position)
+                    #position = skipspaces(str, position)
                 end
                 break
             else
@@ -771,8 +773,8 @@ function parseifstatement(str, position)
         elseif ttype == ')'
             inbraces -= 1
             if inbraces == 0 && endcond == -1
-                endcond = position-1
-                startexec = position + 1
+                endcond = prevind(str, position)
+                startexec = nextind(str, position)
             end
             position = skiptoken(str, position)
         else
@@ -781,14 +783,15 @@ function parseifstatement(str, position)
     end
 
     #@show startcond, endcond, startexec, endexec, afterthencomment
-    return position-position0, wothen, str[startcond:endcond], str[startexec:endexec], afterthencomment
-    #return position-position0, wothen, strip(str[startcond:endcond]), str[startexec:endexec], afterthencomment
+    return ncodeunits(str[position0:prevind(str,position)]), wothen,
+           str[startcond:endcond], str[startexec:endexec], afterthencomment
 end
 
 function picktoken(str, i)
     islbrace(c::AbstractChar) = c=='(' || c=='['
     isrbrace(c::AbstractChar) = c==')' || c==']'
-    len = length(str)
+    len = ncodeunits(str)
+    i = thisind(str, i)
     i > len && return 'e'
     c = str[i]
     if isspace(c) && c != '\n'
@@ -811,88 +814,91 @@ function picktoken(str, i)
 end
 
 function catchtokenvar(str, i)
-    eos() = i>len; len = length(str)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     start = i
     while true
-        i += 1
+        i = nextind(str, i)
         if eos() || !(picktoken(str, i) in ('l', 'd', '_'))
-            return start, i-1
+            return start, prevind(str,i)
         end
     end
 end
 function catchtokenstring(str, i)
-    eos() = i>len; len = length(str)
-    start = i + 1
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    start = nextind(str, i)
     while true
-        i += 1
-        eos() && return start, i-1
-        if picktoken(str, i) == ''' && picktoken(str, i+1) == ''' # double ' -- escaped
-            i += 1
+        i = nextind(str, i)
+        eos() && return start, prevind(str, i)
+        if picktoken(str, i) == ''' && picktoken(str, nextind(str, i)) == ''' # double ' -- escaped
+            i = nextind(str, i)
         elseif picktoken(str, i) == '''
-            return start, i-1
+            return start, prevind(str, i)
         end
     end
 end
 function catchtoken(str, i)
-    eos() = i>len; len = length(str)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     start = i
     ttype = picktoken(str, i)
     while true
-        i += 1
+        i = nextind(str, i)
         if eos() || picktoken(str, i) != ttype
-            return start, i-1
+            return start, prevind(str,i)
         end
     end
 end
 function catchspaces(str, i)
-    eos() = i>len; len = length(str)
-    eos() && return len, len-1
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    eos() && return len, prevind(str,len)
     start = i
     while !eos() && isspace(str[i])
         if str[i] != '\n'
-            i += 1
+            i = nextind(str, i)
         else
             catched, _, iend = catchcontinuedlines(str, i)
             if catched
-                i = iend + 1
+                i = nextind(str, iend)
             else
                 break
             end
         end
     end
-    return start, i-1
+    return start, prevind(str,i)
 end
 function catchcomment(str, i)
-    eos() = i>len; len = length(str)
-    eos() && return len, len-1
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    eos() && return len, prevind(str,len)
     start = i
     while !eos() && str[i] != '\n'
-            i += 1
+        i = nextind(str, i)
     end
-    return start, i-1
+    return start, prevind(str, i)
 end
 function catchcontinuedlines(str, i)
-    eos() = i>len; len = length(str)
-    eos() && return false, len, len-1
-    str[i] != '\n' && return false, i, i-1
-    if isfixedformfortran && len>i+6 && str[i+1:i+5] == "     " && str[i+6] != ' '
-        return true, i, i+6
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    eos() && return false, len, prevind(str,len)
+    str[i] != '\n' && return false, i, prevind(str,i)
+    if isfixedformfortran && len>nextind(str,i,6) && str[nextind(str,i):nextind(str,i,5)] == "     " && str[nextind(str,i,6)] != ' '
+        return true, i, nextind(str,i,6)
+    ###if isfixedformfortran && len>i+6 && str[i+1:i+5] == "     " && str[i+6] != ' '
+    ###    return true, i, i+6
     elseif !isfixedformfortran && iscontinuedlinefreeform(str, i)
         # look behind for '&' at end of line
         return true, i, i
     else
-        return false, i, i-1
+        return false, i, prevind(str,i)
     end
 end
 
 function iscontinuedlinefreeform(str, i)
+    i = thisind(str, i)
     len = i
-    while len < length(str) && str[len] !='\n'
-        len += 1
+    while len < ncodeunits(str) && str[len] !='\n'
+        len = nextind(str, len)
     end
     # look from start of line
-    while i>1 && str[i-1] !='\n'
-        i -= 1
+    while i>1 && str[prevind(str, i)] !='\n'
+        i = prevind(str, i)
     end
     while i <= len
         if str[i] == ' '
@@ -902,12 +908,12 @@ function iscontinuedlinefreeform(str, i)
         elseif str[i] == '#'
             return false
         elseif str[i] == '&'
-            t, i = '&', i+1
+            t, i = '&', nextind(str, i)
             i = skipwhitespaces(str, i)
-            if i > length(str) || str[i] == '#' || str[i] == '\n'
+            if i > ncodeunits(str) || str[i] == '#' || str[i] == '\n'
                 return true
             elseif str[i] == '&' # catch "&&" operator
-                i += 1
+                i = nextind(str, i)
             else
                 @error("unexpected '$(str[i])' after '$(t)'")
                 i = skiptoken(str, i)
@@ -920,30 +926,30 @@ function iscontinuedlinefreeform(str, i)
 end
 
 function marktoken(str, i)
-    len = length(str)
-    i > len && return len, len-1, len+1
+    len = ncodeunits(str); i = thisind(str, i)
+    i > len && return len, prevind(str, len), len+1
     ttype = picktoken(str, i)
     if ttype == 'l'      # catch keywords and identifiers
         startpos, endpos = catchtokenvar(str, i)
-        return startpos, endpos, endpos + 1
+        return startpos, endpos, nextind(str, endpos)
     elseif ttype == '''  # strings
         startpos, endpos = catchtokenstring(str, i)
-        return startpos, endpos, endpos + 2
+        return startpos, endpos, nextind(str, nextind(str, endpos))
     elseif ttype == ' '  # catch spaces
         startpos, endpos = catchspaces(str, i)
-        return startpos, endpos, endpos + 1
+        return startpos, endpos, nextind(str, endpos)
     elseif ttype == '#'  # catch comment
         startpos, endpos = catchcomment(str, i)
-        return startpos, endpos, endpos + 1
+        return startpos, endpos, nextind(str, endpos)
     #elseif ttype == 'd'  # catch integer|float numbers
     elseif ttype == 'd'  # catch integer number
         startpos, endpos = catchtoken(str, i)
-        return startpos, endpos, endpos + 1
+        return startpos, endpos, nextind(str, endpos)
     elseif ttype == '*'  # catch '**' operator
         startpos, endpos = catchtoken(str, i)
-        return startpos, endpos, endpos + 1
+        return startpos, endpos, nextind(str, endpos)
     else                 # all other tokens should be singles
-        return i, i, i + 1
+        return i, i, nextind(str, i)
     end
 end
 
@@ -956,16 +962,16 @@ skipcomment(str, i)   = catchcomment(str, i)[2] + 1
 isoneline(str)        = !('\n' in str)
 
 function skipwhitespaces(str, i)
-    eos() = i>len; len = length(str)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     eos() && return len+1
     while !eos() && str[i] == ' '
-        i += 1
+        i = nextind(str, i)
     end
     return i
 end
 
 function skipupto(c, str, i)
-    eos() = i>len; len = length(str)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     while true
         eos() && return len+1
         if str[i] == ''' != c # skip string
@@ -973,7 +979,7 @@ function skipupto(c, str, i)
         elseif str[i] == c == '\n'
             catched, _, iend = catchcontinuedlines(str, i)
             if catched
-                i = iend + 1
+                i = nextind(str, iend)
             else
                 break
             end
@@ -982,7 +988,7 @@ function skipupto(c, str, i)
         elseif str[i] == c
             break
         else
-            i += 1
+            i = nextind(str, i)
         end
     end
     return i
@@ -1083,36 +1089,6 @@ function replacedocontinue(code, dolabels, gotolabels)
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
 end
 
-function processifstatements1(code)
-    # https://stackoverflow.com/questions/36357344/how-to-match-paired-closing-bracket-with-regex
-    # https://regex101.com/r/ENCs20/3
-    rx1 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))\h*((?!.*then)[^#\n]+(?!.*\n[ ]{5}[^ ][^\n]+))"mi
-    #rx1 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))(\h*(?!.*then)[^#\n]+(?!.*\n[ ]{5}[^ ][^\n]+))"mi
-    for m in collect(eachmatch(rx1, code))
-        if length(m.match) <= 72
-            code = replace(code, rx1 => SubstitutionString("\\1if_iZjAcpPokM\\2\\3 \\5 end "))
-        else
-            code = replace(code, rx1 => SubstitutionString("\\1if_iZjAcpPokM\\2\\3\n\\1\\5\n\\1end "))
-        end
-    end
-
-    # https://regex101.com/r/eF9bK5/22
-    rx2 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))\h*((?!.*then)[^#\n]+(?:\n[ ]{5}[.$&\w][^\n]+)+)"mi =>
-    SubstitutionString("\\1if_iZjAcpPokM\\2\\3 \\5\n\\1end ")
-    # https://regex101.com/r/CAgzIA/5
-    rx3 = r"^(\h*)(if\h*)(\(((?>[^()]++|(?3))*)\))([\h\n]*(?:^[*c#].*$|))((#[^\n]*|)*\n[ ]{5}[.$&])+(\h*(?!.*then)[^\n]+)((?:\n[ ]{5}[.$&\w][^\n]+|(?:\n[*c#][^\n]*$))*)"mi =>
-    #rx3 = r"^(\h*)(?:if)(\h*)(\(((?>[^()]++|(?3))*)\))(\h*)((#[^\n]*|)*\n[ ]{5}[.$&\w])+(\h*(?!.*then)[^\n]+)((?:\n[ ]{5}[.$&\w][^\n]+)*|)"mi =>
-    SubstitutionString("\\1if_iZjAcpPokM\\3 \\7\n      \\8\\9\n\\1end")
-    #SubstitutionString("\\1if_iZjAcpPokM\\2\\3 \\7\n      \\8\\9\n\\1end")
-
-    code = replace(code, rx2)
-    code = replace(code, rx3)
-
-    code = replace(code, r"if_iZjAcpPokM" => "if")
-
-    return code
-end
-
 """
 replace array's braces with square brackets
 """
@@ -1133,8 +1109,8 @@ function replacearraysbrackets(code, arrays)
     rx = r"(\[((?>[^\[\]]++|(?1))*)\])\h*(\(((?>[^\(\)]++|(?1))*)\))"
     code = replace(code, rx => s"\1[\4]")
 
-    # fix uncompleted ranges in square braces like [1:] and [:1], only simplest variants
-    brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
+    # fix uncompleted ranges in square braces like [1:] and [:1], only one-dimension indices
+    brackets = Regex("\\[((?>[^\\[\\],]++|(?0))*)\\]") # complementary brackets
     rx = r"\[(.*|)([ ]+|):([ ]+|)(.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
@@ -1662,14 +1638,6 @@ const replacements = OrderedDict(
     # Fix assignments
     r"(?<=[^\s=<>!/\\])=(?=[^\s=])" => " = ",
     #r"(?<=[^\s=])=(?=[^\s=])" => " = ",
-    # Add end after single line if: https://regex101.com/r/eF9bK5/6
-    #r"^(\h*)if(\h*)(\(((?>[^()]++|(?3))*)\))\h*((?!then)[^\h].+)"i => s"\1if\2\3 \5 end",
-    #### Single-line IF statement with various terminations
-    ###r"^(\h*)if\s*\((.*?)\)\s*exit(\s*#.*|\s*)$"mi => s"\1\2 && break\3",
-    ###r"^(\h*)if\s*\((.*?)\)\s*return(\s*#.*|\s*)$"mi => s"\1\2 && return\3",
-    ###r"^(\h*)if\s*\((.*?)\)\s*cycle(\s*#.*|\s*)$"mi => s"\1\2 && continue\3",
-    ###r"^(\h*)if\s*\((.*?)\)\s*go\h*to\s+(\d+\h*)(?!end)$"i => s"\1\2 && @goto L\3",
-    ####r"(^\h*)if\s*\((.*?)\)\s*go\h*to\s+(\d+\h*)(?!end)(.*)"i => s"\1\2 && @goto L\3\4",
     # Remove expression's brackets after if/elseif/while https://regex101.com/r/eF9bK5/17
     r"^(\h*)(if|elseif|while)(\h*)(\(((?>[^()]++|(?4))*)\))\h*$"m => s"\1\2\3\5",
     # Process PARAMETER
