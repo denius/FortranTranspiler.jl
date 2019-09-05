@@ -25,6 +25,7 @@ using DataStructures, Printf, JuliaFormatter
     * this script is mostly for fixed-form fortran and free-form is not tested yet.
     * in the `DATA` statement can occur uncatched repetitions like `DATA SOMEARRAY/8*0,1,2/`
     * `READ`/`WRITE` is ugly
+    * can't substitude dynamic - created at runtime FORMAT string
     * `FORMAT` is incorrect sometimes
 
 # TODO
@@ -147,7 +148,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code, formats = collectformat(code)
         veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
-        #formats = convertformat(formats)
+        #formats = map(convertformat, formats)
 
         # comment out all vars declarations
         code = commentoutdeclarations(code)
@@ -160,11 +161,12 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = replacedocontinue(code, dolabels, gotolabels)
         code = processconditionalgotos(code)
 
-        code = processreadwrites(code, formats)
+        code = processiostatements(code, formats)
         #code = enclosereadwrite(code)
 
         code = processifstatements(code)
 
+        write("test.jl", code)
         # process multiline replacements
         for rx in multilinereplacements
             code = replace(code, rx)
@@ -708,6 +710,8 @@ function processifstatements(code)
             else
                 str *= ifexec * "\n" * " "^length(s1) * "end "
             end
+        elseif wothen == false && picktoken(ifcond, skipwhitespaces(ifcond, 1)) in ('#','\n',' ')
+            str = s1 * s2 * "if_iZjAcpPokM (" * ifcond * ")" * afterthencomment
         elseif wothen == false
             str = s1 * s2 * "if_iZjAcpPokM " * strip(ifcond) * afterthencomment
         else
@@ -788,7 +792,7 @@ function parseifstatement(str, position)
            str[startcond:endcond], str[startexec:endexec], afterthencomment
 end
 
-function processreadwrites(code, formats)
+function processiostatements(code, formats)
     code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
     rxhead = r"(\bread\b|\bwrite\b)\h*\("mi
     rxargs = r"^((?:.*[\n])*.*?)(\h*#[^\n]*)"m  # https://regex101.com/r/PqvHQD/1
@@ -798,19 +802,21 @@ function processreadwrites(code, formats)
         iolength, io, label, fmt, pmt, paramsstr, args = parsereadwrite(code1, o)
         #@show iolength, io, label, fmt, pmt, paramsstr, args
         length(label) > 0 && haskey(formats, label) && (fmt = formats[label])
-        fmt = convertformat([fmt])[1]
+        #length(fmt) > 0 && @show fmt
+        fmt = convertformat(fmt)
         if  readwrite == "read" && (io == "5" || io == "*")
             io = "stdin"
         elseif  readwrite == "write" && (io == "6" || io == "*")
             io = "stdout"
         end
-        args = occursin(rxargs, args) ? replace(args, rxargs=>s"\1)\2") : strip(args)*')'
+        args = occursin(rxargs, args) ? replace(args, rxargs=>s"\1)\2") : rstrip(args)*')'
         str  =  readwrite == "read" ? "READ(" :
                 fmt       == ""    ? "println(" : "at_iZjAcpPokMprintf("
         if str == "at_iZjAcpPokMprintf("
             fmt = occursin(r"\$$", fmt) ? replace(fmt, @r_str("\\\$\$") => "") : fmt*"\\n"
         end
 
+        #length(fmt) > 0 && @show fmt
         fmt != "" && (fmt = '"' * fmt * "\", " )
         str *= io * ", " * fmt * args
         code1 = code1[1:prevind(code1,o)] * str * code1[thisind(code1,o+iolength):end]
@@ -823,19 +829,19 @@ function parsereadwrite(str, position)
     label = ""
     fmt = ""
     IU = ""
-    commentafterwrite = ""
     params = Dict{String,String}()
     cmdtaken = false
     inparams = false
     nextparam = 1
-    startparams = startargs = 0
-    endparams = endargs = -1
+    startsparam = Int[]
+    endsparam = Int[]
+    startargs = 0
+    endargs = -1
     inbraces  = 0
 
     while true
         ttype = picktoken(str, position)
         #print("_$ttype")
-        #@show ttype, cmdtaken, inbraces, startparams, endparams, startargs, endargs
         if ttype == 'e' || ttype == '\n'
             break
         elseif ttype == ' '
@@ -847,50 +853,41 @@ function parsereadwrite(str, position)
                 position = skipspaces(str, position)
             else
                 # that is not an 'READ/WRITE' statement
-                return 0, wothen, "", "", ""
+                return 0, "", "", "", "", "", "", ""
             end
         elseif cmdtaken && inparams && ttype == 'l'
             lex, position = taketoken(str, position)
             LEX = uppercase(lex)
             if LEX == "FMT" && picktoken(str, skipspaces(str, position)) == '='
                 label, position = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, position))))
-                nextparam += 1
             elseif (LEX == "ERR" || LEX == "END") && picktoken(str, skipspaces(str, position)) == '='
                 val, position = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, position))))
                 params[uppercase(lex)] = val
-                nextparam += 1
             elseif nextparam == 1
                 IU = lex
-                nextparam += 1
             else
-                @error("unknown token lex=$lex in WRITE params @$(@__LINE__)\n")
+                @warn("processiostatements(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
+                      " in FORTRAN line:\n\"$(strip(thisline(str, position)))\"\n")
             end
         elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
             IU, position = taketoken(str, position)
-            nextparam += 1
         elseif cmdtaken && inparams && ttype == 'd'
             label, position = taketoken(str, position)
-            nextparam += 1
         elseif cmdtaken && inparams && ttype == '*' && nextparam == 1
             IU, position = taketoken(str, position)
-            nextparam += 1
         elseif cmdtaken && inparams && ttype == ''' || ttype == '*'
             fmt, position = taketoken(str, position)
-            nextparam += 1
-        #elseif cmdtaken && inparams
-        #    position = skiptoken(str, position)
-        #    @error("unknown token $ttype in WRITE params @$(@__LINE__)\n")
         elseif ttype == '('
             inbraces += 1
             position = skiptoken(str, position)
-            if startparams == 0
-                startparams = position
+            if length(startsparam) == 0
+                push!(startsparam, position)
                 inparams = true
             end
         elseif ttype == ')'
             inbraces -= 1
-            if inbraces == 0 && endparams == -1
-                endparams = prevind(str, position)
+            if inbraces == 0 && inparams
+                push!(endsparam, prevind(str, position))
                 startargs = nextind(str, position)
                 inparams = false
                 endargs = position = skipupto('\n', str, position)
@@ -898,10 +895,17 @@ function parsereadwrite(str, position)
                 break
             end
             position = skiptoken(str, position)
+        elseif ttype == ',' && inparams && inbraces == 1
+            push!(endsparam, prevind(str, position))
+            position = skiptoken(str, position)
+            push!(startsparam, thisind(str, position))
+            nextparam += 1
         else
             position = skiptoken(str, position)
         end
     end
+
+    IU = strip(str[startsparam[1]:endsparam[1]])
 
     if fmt == "*"
         fmt = ""
@@ -910,9 +914,46 @@ function parsereadwrite(str, position)
     end
     fmt = foldl((a,b) -> a*','*b, map(strip, split(fmt, ",")))
 
-    #@show startparams, endparams, startargs, endargs, commentafterwrite
     return ncodeunits(str[position0:prevind(str,position)]), IU, label, fmt, params,
-           str[startparams:endparams], str[startargs:endargs] #, commentafterwrite
+           str[startsparam[1]:endsparam[end]], str[startargs:endargs]
+end
+
+function splitformat(str)
+    position = 1
+    lexemstarts = Int[1]
+    lexemends = Int[]
+    inbraces  = 0
+
+    while true
+        ttype = picktoken(str, position)
+        #print("_$ttype")
+        if ttype == 'e' || ttype == '\n'
+            break
+        elseif ttype == ' '
+            position = skipwhitespaces(str, position)
+        elseif ttype == ',' && inbraces == 0
+            push!(lexemends, prevind(str, position))
+            position = skiptoken(str, position)
+            push!(lexemstarts, thisind(str, position))
+        elseif ttype == '('
+            inbraces += 1
+            position = skiptoken(str, position)
+        elseif ttype == ')'
+            inbraces -= 1
+            position = skiptoken(str, position)
+        else
+            position = skiptoken(str, position)
+        end
+    end
+    push!(lexemends, ncodeunits(str))
+    @assert length(lexemstarts) == length(lexemends)
+
+    fmt = String[]
+    for (i,j) in zip(lexemstarts, lexemends)
+        push!(fmt, strip(str[i:j]))
+    end
+
+    return fmt
 end
 
 function picktoken(str, i)
@@ -1006,7 +1047,8 @@ function catchcontinuedlines(str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     eos() && return false, len, prevind(str,len)
     str[i] != '\n' && return false, i, prevind(str,i)
-    if isfixedformfortran && len>nextind(str,i,6) && str[nextind(str,i):nextind(str,i,5)] == "     " && str[nextind(str,i,6)] != ' '
+    if isfixedformfortran && len>nextind(str,i,6) &&
+       str[nextind(str,i):nextind(str,i,5)] == "     " && str[nextind(str,i,6)] != ' '
         return true, i, nextind(str,i,6)
     ###if isfixedformfortran && len>i+6 && str[i+1:i+5] == "     " && str[i+6] != ' '
     ###    return true, i, i+6
@@ -1043,7 +1085,7 @@ function iscontinuedlinefreeform(str, i)
             elseif str[i] == '&' # catch "&&" operator
                 i = nextind(str, i)
             else
-                @error("unexpected '$(str[i])' after '$(t)'")
+                @warn("unexpected '$(str[i])' after '$(t)'")
                 i = skiptoken(str, i)
             end
         else
@@ -1088,6 +1130,7 @@ skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : 
 skipspaces(str, i)    = catchspaces(str, i)[2] + 1
 skipcomment(str, i)   = catchcomment(str, i)[2] + 1
 isoneline(str)        = !('\n' in str)
+existind(str, i)      = thisind(str, min(max(1,i), ncodeunits(str)))
 
 function skipwhitespaces(str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
@@ -1122,6 +1165,18 @@ function skipupto(c, str, i)
     return i
 end
 
+function thisline(str, i)
+    i = thisind(str, i)
+    len = i
+    while len < ncodeunits(str) && str[len] !='\n'
+        len = nextind(str, len)
+    end
+    # look from start of line
+    while i>1 && str[prevind(str, i)] !='\n'
+        i = prevind(str, i)
+    end
+    return str[i:len]
+end
 
 function collectlabels(code)
     code1 = stripcomments(code)
@@ -1247,7 +1302,8 @@ function replacearraysbrackets(code, arrays)
             code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
         end
     end
-    rx = r"\[(.+):(,.*|)\]"
+    rx = r"\[(.*[^,]):(,.*|)\]"
+    #rx = r"\[(.+):(,.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
@@ -1255,7 +1311,7 @@ function replacearraysbrackets(code, arrays)
                    code[o+length(m.match):end]
         end
     end
-    rx = r"\[:(.+)\]"
+    rx = r"\[:([^,].*)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
@@ -1288,39 +1344,10 @@ function collectformat(code)
         (i += 1) > length(lines) && break
     end
 
-    FMT = OrderedDict(
-        r"^([^']*)'(.*)'([^']*)$"=>s"\1\2\3" # unenclose ''
-       )
-    # trimming and some preparing
-    for i in keys(formats)
-        #formats[i] = replace(formats[i], r"[/]" => ",\\n,")
-        v = split(formats[i], ",")
-        v = map(strip, v)
-        #for rs in FMT
-        #    v = map( a->replace(a, rs), v)
-        #end
-        formats[i] = foldl((a,b) -> a*','*b, v)
-    end
-
-    #### collect all other format strings
-    ###lines = splitonlines(code)
-    ###idx = 100001
-    #### https://regex101.com/r/G1uBG2/1
-    ###rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)*|)(\)\h*.*)"mi
-    ####rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)?\)\h*.*)"mi
-    ###for i in 1:length(lines)
-    ###    m = match(rx, lines[i])
-    ###    if !isnothing(m)
-    ###        formats[string(idx)] = replace(m.captures[2], r"'\((.*)\)'" => s"\1")
-    ###        lines[i] = m.captures[1] * string(idx) * m.captures[3] * m.captures[4]
-    ###        idx += 1
-    ###    end
-    ###end
-    ###return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines), formats
     return code, formats
 end
 
-function convertformat(formatstrings)
+function convertformat(formatstring)
     rep = r"^(\d+)(.*)$"
     FMT = OrderedDict(
         r"^A$"i           => s"%s",               # A -> %s
@@ -1332,33 +1359,23 @@ function convertformat(formatstrings)
         r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
         r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
     )
-    for k in keys(formatstrings)
-        format = split(formatstrings[k], ",") # FIXME: format can contain the escaped ',' inside the strings
-        format2 = Vector{String}(undef, 0)
-        for (i,el) in enumerate(format) # eval repeats in the format
-            if occursin(rep, el)
-                num = parse(Int, replace(el, rep=>s"\1"))
-                str = replace(el, rep => s"\2")
-                occursin(r"\(.*\)", str) && (str = replace(str,  r"\((.*)\)"=> s"\1"))
-                [push!(format2, str) for j=1:num]
-            else
-                push!(format2, el)
-            end
+    format = splitformat(formatstring)
+    format2 = Vector{String}(undef, 0)
+    for (i,el) in enumerate(format) # eval repeats in the format
+        if occursin(rep, el)
+            num = parse(Int, replace(el, rep=>s"\1"))
+            str = replace(el, rep => s"\2")
+            occursin(r"\(.*\)", str) && (str = replace(str,  r"\((.*)\)"=> s"\1"))
+            [push!(format2, str) for j=1:num]
+        else
+            push!(format2, el)
         end
-        format = format2
-        for rs in FMT
-            format = map( a->replace(a, rs), format)
-        end
-        formatstrings[k] = foldl(*, format)
-        ## only for output
-        #if occursin(r"\$$", formatstrings[k])
-        #    formatstrings[k] = replace(formatstrings[k], @r_str("\\\$\$") => "")
-        #elseif length(formatstrings[k]) > 0
-        #    formatstrings[k] *= "\\n"
-        #end
-        ####formatstrings[k] = replace(formatstrings[k], "'" => "")
     end
-    return formatstrings
+    format = format2
+    for rs in FMT
+        format = map( a->replace(a, rs), format)
+    end
+    return foldl(*, format)
 end
 
 function includeformat1(code, format)
@@ -1607,7 +1624,7 @@ function savespecialsymbols(code)
     # save '#', '@', '!', "''"
     # https://regex101.com/r/YrkC9C/1
     rx = r"('((?>[^'\n]*|(?1))*)'){2,}"m
-    for (i,m) in enumerate(reverse(collect(eachmatch(rx, code))))
+    for m in reverse(collect(eachmatch(rx, code)))
         str = m.match
         len = ncodeunits(code)
         while true
@@ -1616,19 +1633,30 @@ function savespecialsymbols(code)
         end
         code = replace(code, m.match => str)
     end
+    # save '!' inside strings
+    rx = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = replace(m.match, r"!" => "bang_iZjAcpPokM")
+        code = replace(code, m.match => str)
+    end
+    # save '"' inside strings
+    rx = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = replace(m.match, r"\"" => "quote_iZjAcpPokM")
+        code = replace(code, m.match => str)
+    end
     code  = replace(code, r"#" => "sha_iZjAcpPokM")
     code  = replace(code, r"@" =>  "at_iZjAcpPokM")
-    # https://regex101.com/r/eF9bK5/13
-    code  = replace(code, r"('[^'!\n]*)(!)([^'\n]*')" => s"\1bang_iZjAcpPokM\3")
     return code
 end
 function restorespecialsymbols(code)
     # restore saved symbols
-    code = replace(code,  r"sha_iZjAcpPokM" => "#")
-    code = replace(code,   r"at_iZjAcpPokM" => "@")
-    code = replace(code, r"bang_iZjAcpPokM" => "!")
+    code = replace(code,      r"sha_iZjAcpPokM" => "#")
+    code = replace(code,       r"at_iZjAcpPokM" => "@")
+    code = replace(code,     r"bang_iZjAcpPokM" => "!")
+    code = replace(code,    r"quote_iZjAcpPokM" => "\\\"")
     code = replace(code, r"GhUtwoap_iZjAcpPokM" => "'")
-    code = replace(code, r"lastpos_iZjAcpPokM" => "end")
+    code = replace(code,  r"lastpos_iZjAcpPokM" => "end")
     return code
 end
 
