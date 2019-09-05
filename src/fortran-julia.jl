@@ -147,7 +147,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code, formats = collectformat(code)
         veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
-        formats = convertformat(formats)
+        #formats = convertformat(formats)
 
         # comment out all vars declarations
         code = commentoutdeclarations(code)
@@ -160,7 +160,8 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = replacedocontinue(code, dolabels, gotolabels)
         code = processconditionalgotos(code)
 
-        code = enclosereadwrite(code)
+        code = processreadwrites(code, formats)
+        #code = enclosereadwrite(code)
 
         code = processifstatements(code)
 
@@ -199,7 +200,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         # append comments back
         lines = map(*, lines, comments)
 
-        lines = includeformat(lines, formats)
+        #lines = includeformat(lines, formats)
 
         # concat string lines back together and
         # create functions declaration with custom header
@@ -764,7 +765,7 @@ function parseifstatement(str, position)
             else
                 wothen = true
                 endexec = position = skipupto('\n', str, position)
-                endexec -= 1
+                endexec = prevind(str, endexec) #endexec -= 1
             end
         elseif ttype == '('
             inbraces += 1
@@ -785,6 +786,133 @@ function parseifstatement(str, position)
     #@show startcond, endcond, startexec, endexec, afterthencomment
     return ncodeunits(str[position0:prevind(str,position)]), wothen,
            str[startcond:endcond], str[startexec:endexec], afterthencomment
+end
+
+function processreadwrites(code, formats)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
+    rxhead = r"(\bread\b|\bwrite\b)\h*\("mi
+    rxargs = r"^((?:.*[\n])*.*?)(\h*#[^\n]*)"m  # https://regex101.com/r/PqvHQD/1
+    for (i,m) in enumerate(reverse(collect(eachmatch(rxhead, code1))))
+        o = m.offset
+        readwrite = lowercase(replace(m.match, rxhead => s"\1"))
+        iolength, io, label, fmt, pmt, paramsstr, args = parsereadwrite(code1, o)
+        #@show iolength, io, label, fmt, pmt, paramsstr, args
+        length(label) > 0 && haskey(formats, label) && (fmt = formats[label])
+        fmt = convertformat([fmt])[1]
+        if  readwrite == "read" && (io == "5" || io == "*")
+            io = "stdin"
+        elseif  readwrite == "write" && (io == "6" || io == "*")
+            io = "stdout"
+        end
+        args = occursin(rxargs, args) ? replace(args, rxargs=>s"\1)\2") : strip(args)*')'
+        str  =  readwrite == "read" ? "READ(" :
+                fmt       == ""    ? "println(" : "at_iZjAcpPokMprintf("
+        if str == "at_iZjAcpPokMprintf("
+            fmt = occursin(r"\$$", fmt) ? replace(fmt, @r_str("\\\$\$") => "") : fmt*"\\n"
+        end
+
+        fmt != "" && (fmt = '"' * fmt * "\", " )
+        str *= io * ", " * fmt * args
+        code1 = code1[1:prevind(code1,o)] * str * code1[thisind(code1,o+iolength):end]
+    end
+    return code isa AbstractVector ? split(code1, '\n') : code1
+end
+
+function parsereadwrite(str, position)
+    position0 = position
+    label = ""
+    fmt = ""
+    IU = ""
+    commentafterwrite = ""
+    params = Dict{String,String}()
+    cmdtaken = false
+    inparams = false
+    nextparam = 1
+    startparams = startargs = 0
+    endparams = endargs = -1
+    inbraces  = 0
+
+    while true
+        ttype = picktoken(str, position)
+        #print("_$ttype")
+        #@show ttype, cmdtaken, inbraces, startparams, endparams, startargs, endargs
+        if ttype == 'e' || ttype == '\n'
+            break
+        elseif ttype == ' '
+            position = skipspaces(str, position)
+        elseif !cmdtaken && ttype == 'l'
+            lex, position = taketoken(str, position)
+            if lowercase(lex) == "read" || lowercase(lex) == "write"
+                cmdtaken = true
+                position = skipspaces(str, position)
+            else
+                # that is not an 'READ/WRITE' statement
+                return 0, wothen, "", "", ""
+            end
+        elseif cmdtaken && inparams && ttype == 'l'
+            lex, position = taketoken(str, position)
+            LEX = uppercase(lex)
+            if LEX == "FMT" && picktoken(str, skipspaces(str, position)) == '='
+                label, position = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, position))))
+                nextparam += 1
+            elseif (LEX == "ERR" || LEX == "END") && picktoken(str, skipspaces(str, position)) == '='
+                val, position = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, position))))
+                params[uppercase(lex)] = val
+                nextparam += 1
+            elseif nextparam == 1
+                IU = lex
+                nextparam += 1
+            else
+                @error("unknown token lex=$lex in WRITE params @$(@__LINE__)\n")
+            end
+        elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
+            IU, position = taketoken(str, position)
+            nextparam += 1
+        elseif cmdtaken && inparams && ttype == 'd'
+            label, position = taketoken(str, position)
+            nextparam += 1
+        elseif cmdtaken && inparams && ttype == '*' && nextparam == 1
+            IU, position = taketoken(str, position)
+            nextparam += 1
+        elseif cmdtaken && inparams && ttype == ''' || ttype == '*'
+            fmt, position = taketoken(str, position)
+            nextparam += 1
+        #elseif cmdtaken && inparams
+        #    position = skiptoken(str, position)
+        #    @error("unknown token $ttype in WRITE params @$(@__LINE__)\n")
+        elseif ttype == '('
+            inbraces += 1
+            position = skiptoken(str, position)
+            if startparams == 0
+                startparams = position
+                inparams = true
+            end
+        elseif ttype == ')'
+            inbraces -= 1
+            if inbraces == 0 && endparams == -1
+                endparams = prevind(str, position)
+                startargs = nextind(str, position)
+                inparams = false
+                endargs = position = skipupto('\n', str, position)
+                endargs = prevind(str, endargs)
+                break
+            end
+            position = skiptoken(str, position)
+        else
+            position = skiptoken(str, position)
+        end
+    end
+
+    if fmt == "*"
+        fmt = ""
+    else
+        fmt = replace(fmt, r"^\((.*)\)$"=>s"\1") # unenclose "()"
+    end
+    fmt = foldl((a,b) -> a*','*b, map(strip, split(fmt, ",")))
+
+    #@show startparams, endparams, startargs, endargs, commentafterwrite
+    return ncodeunits(str[position0:prevind(str,position)]), IU, label, fmt, params,
+           str[startparams:endparams], str[startargs:endargs] #, commentafterwrite
 end
 
 function picktoken(str, i)
@@ -1110,7 +1238,8 @@ function replacearraysbrackets(code, arrays)
     code = replace(code, rx => s"\1[\4]")
 
     # fix uncompleted ranges in square braces like [1:] and [:1], only one-dimension indices
-    brackets = Regex("\\[((?>[^\\[\\],]++|(?0))*)\\]") # complementary brackets
+    brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
+    #brackets = Regex("\\[((?>[^\\[\\],]++|(?0))*)\\]") # complementary brackets
     rx = r"\[(.*|)([ ]+|):([ ]+|)(.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
@@ -1118,7 +1247,7 @@ function replacearraysbrackets(code, arrays)
             code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
         end
     end
-    rx = r"\[(.*):(,.*|)\]"
+    rx = r"\[(.+):(,.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
@@ -1126,7 +1255,7 @@ function replacearraysbrackets(code, arrays)
                    code[o+length(m.match):end]
         end
     end
-    rx = r"\[:(.*)\]"
+    rx = r"\[:(.+)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
@@ -1141,39 +1270,54 @@ function collectformat(code)
     code1 = concatlinecontinuation(code1)
     lines = splitonlines(code1)
 
-    rx = r"^\h*(\d+)\h+format\h*\((.+)\)"mi
-    format = Dict{String,String}()
-    for i in 1:length(lines)
-        m = match(rx, lines[i])
-        if !isnothing(m) format[m.captures[1]] = m.captures[2] end
+    lines = splitonlines(code)
+    rx = r"^\h*(\d+)\h+format\h*\("mi
+    rxextr = r"^\h*(\d+)\h+format\h*\((.+)\)"mi
+    formats = Dict{String,String}()
+    i = 1
+    while true
+        if occursin(rx, lines[i])
+            # collect the lines that make up the format statement
+            str = "" * lines[i]
+            while iscontinued(lines[i], i<length(lines) ? lines[i+1] : "")
+                str = concatlines(str, lines[i+=1])
+            end
+            m = match(rxextr, str)
+            if !isnothing(m) formats[m.captures[1]] = m.captures[2] end
+        end
+        (i += 1) > length(lines) && break
     end
+
     FMT = OrderedDict(
         r"^([^']*)'(.*)'([^']*)$"=>s"\1\2\3" # unenclose ''
        )
-    for i in keys(format)
-        format[i] = replace(format[i], r"[/]" => ",\\n,")
-        v = split(format[i], ",")
-        #v = map(strip, v)
-        for rs in FMT
-            v = map( a->replace(a, rs), v)
-        end
-        format[i] = foldl((a,b) -> a*','*b, v)
+    # trimming and some preparing
+    for i in keys(formats)
+        #formats[i] = replace(formats[i], r"[/]" => ",\\n,")
+        v = split(formats[i], ",")
+        v = map(strip, v)
+        #for rs in FMT
+        #    v = map( a->replace(a, rs), v)
+        #end
+        formats[i] = foldl((a,b) -> a*','*b, v)
     end
-    # collect all other format strings
-    lines = splitonlines(code)
-    idx = 100001
-    # https://regex101.com/r/G1uBG2/1
-    rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)*|)(\)\h*.*)"mi
-    #rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)?\)\h*.*)"mi
-    for i in 1:length(lines)
-        m = match(rx, lines[i])
-        if !isnothing(m)
-            format[string(idx)] = replace(m.captures[2], r"'\((.*)\)'" => s"\1")
-            lines[i] = m.captures[1] * string(idx) * m.captures[3] * m.captures[4]
-            idx += 1
-        end
-    end
-    return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines), format
+
+    #### collect all other format strings
+    ###lines = splitonlines(code)
+    ###idx = 100001
+    #### https://regex101.com/r/G1uBG2/1
+    ###rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)*|)(\)\h*.*)"mi
+    ####rx = r"^(\h*\d*\h*(?:write|read)\h*\(\h*[\*\w]+\h*,\h*)('\(.+\)')(\h*(?:,\h*[ =\w]+\h*)?\)\h*.*)"mi
+    ###for i in 1:length(lines)
+    ###    m = match(rx, lines[i])
+    ###    if !isnothing(m)
+    ###        formats[string(idx)] = replace(m.captures[2], r"'\((.*)\)'" => s"\1")
+    ###        lines[i] = m.captures[1] * string(idx) * m.captures[3] * m.captures[4]
+    ###        idx += 1
+    ###    end
+    ###end
+    ###return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines), formats
+    return code, formats
 end
 
 function convertformat(formatstrings)
@@ -1186,12 +1330,12 @@ function convertformat(formatstrings)
         r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
         r"^X$"i           => s" ",                # X -> ' '
         r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
+        r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
     )
     for k in keys(formatstrings)
-        format = split(formatstrings[k], ",") # FIXME: format is recursive
-        format = map(strip, format)
+        format = split(formatstrings[k], ",") # FIXME: format can contain the escaped ',' inside the strings
         format2 = Vector{String}(undef, 0)
-        for (i,el) in enumerate(format) # eval repeats in format
+        for (i,el) in enumerate(format) # eval repeats in the format
             if occursin(rep, el)
                 num = parse(Int, replace(el, rep=>s"\1"))
                 str = replace(el, rep => s"\2")
@@ -1206,16 +1350,18 @@ function convertformat(formatstrings)
             format = map( a->replace(a, rs), format)
         end
         formatstrings[k] = foldl(*, format)
-        if occursin(r"\$$", formatstrings[k])
-            formatstrings[k] = replace(formatstrings[k], @r_str("\\\$\$") => "")
-        else
-            formatstrings[k] *= "\\n"
-        end
+        ## only for output
+        #if occursin(r"\$$", formatstrings[k])
+        #    formatstrings[k] = replace(formatstrings[k], @r_str("\\\$\$") => "")
+        #elseif length(formatstrings[k]) > 0
+        #    formatstrings[k] *= "\\n"
+        #end
+        ####formatstrings[k] = replace(formatstrings[k], "'" => "")
     end
     return formatstrings
 end
 
-function includeformat(code, format)
+function includeformat1(code, format)
     # https://regex101.com/r/auYywX/3 https://regex101.com/r/AA8YPY/2
     rx = r"(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
     #rx = r"^(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
@@ -1459,7 +1605,17 @@ end
 
 function savespecialsymbols(code)
     # save '#', '@', '!', "''"
-    #code  = replace(code, r"(?:[^'\n])('')(?:[^'])" => s"GhUtwoap_iZjAcpPokM")
+    # https://regex101.com/r/YrkC9C/1
+    rx = r"('((?>[^'\n]*|(?1))*)'){2,}"m
+    for (i,m) in enumerate(reverse(collect(eachmatch(rx, code))))
+        str = m.match
+        len = ncodeunits(code)
+        while true
+            str = replace(str, r"('((?>[^'\n]*|(?1))*)')('((?>[^'\n]*|(?1))*)')" => s"'\2GhUtwoap_iZjAcpPokM\4'")
+            len == (len = ncodeunits(str)) && break
+        end
+        code = replace(code, m.match => str)
+    end
     code  = replace(code, r"#" => "sha_iZjAcpPokM")
     code  = replace(code, r"@" =>  "at_iZjAcpPokM")
     # https://regex101.com/r/eF9bK5/13
