@@ -27,6 +27,8 @@ using DataStructures, Printf, JuliaFormatter
     * `READ`/`WRITE` is ugly
     * can't substitude dynamic - created at runtime FORMAT string
     * `FORMAT` is incorrect sometimes
+    * fortran functions returns result via assignment the returned to function name,
+      in julia it is the reassignment, thus should be fixed
 
 # TODO
     return intent(out):
@@ -132,8 +134,6 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     for i = 1:length(subs)-1
 
         code = foldl((a,b) -> a*'\n'*b, view(alllines, subs[i]:subs[i+1]-1))
-        #verbose && print("\nsub name: $(strip(subnames[i]))\n")
-        #verbose && print("$(subs[i]) : $(subs[i+1]-1)\n")
         verbose && print("[$(subs[i]):$(subs[i+1]-1)] $(strip(subnames[i]))\n")
 
         scalars, arrays = collectvars(code)
@@ -162,11 +162,10 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = processconditionalgotos(code)
 
         code = processiostatements(code, formats)
-        #code = enclosereadwrite(code)
 
         code = processifstatements(code)
 
-        write("test.jl", code)
+        #write("test.jl", code)
         # process multiline replacements
         for rx in multilinereplacements
             code = replace(code, rx)
@@ -180,8 +179,6 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = processdata(code)
 
         lines = splitonlines(code)
-
-        #lines = enclosereadwrite(lines)
 
         lines, comments = splitoncomment(lines)
 
@@ -360,7 +357,7 @@ function splitoncomment(code)
         (m = match(rx, lines[i])) != nothing && (comments[i] = m.match)
         lines[i] = replace(lines[i], rx => s"")
     end
-    # cut out all whitespaces not masked by comments
+    # cut out all whitespaces not masked by the comments
     rx = r"\h*$"
     lines = map(a->replace(a, rx => s""), lines)
     return lines, comments
@@ -387,7 +384,7 @@ function processlinescontinuation(lines::AbstractVector)
 end
 
 function concatlinecontinuation(code)
-    # Note: trailing comments is not allowed here
+    # Note: trailing comments are not allowed here
     replacements = OrderedDict(
         r"\n     [.+&$\w]\h*" => "",  # fixed-form startline continuations
         r"&\n"                => ""   # free-form continuations
@@ -444,6 +441,7 @@ function commentoutdeclarations(code)
         r"^\h*external\h+"mi,
         r"^\h*logical.*::"mi,
         r"^\h*logical\h+(?!.*function)"mi,
+        r"^\h*entry\h+.*"mi,
         r"^\h+\d+\h+format\h*\("mi
     ]
 
@@ -494,7 +492,6 @@ function collectvars(code)
     for i in 1:length(matched)
         matched[i] = replace(matched[i], r"\*([\d]+)" => s"(\1)") # character A*7 -> A(7)
         matched[i] = replace(matched[i], r"(\(((?>[^\(\)]++|(?1))*)\))" => s"()")   # clean inside braces
-        #matched[i] = replace(matched[i], r"\([^)]+\)" => s"()")   # clean inside braces
         # https://regex101.com/r/weQOSe/4
         matched[i] = replace(matched[i], r"(\/((?>[^\/]*|(?1))*)\/)" => s"")   # clean /.../ -- statics
         matched[i] = replace(matched[i], r"[^(),]+," => s"")      # drop non-arrays (without braces)
@@ -519,7 +516,7 @@ function collectvars(code)
                 line = replace(l, rx => "")
                 line = replace(line, r" " => s"")
                 line = replace(line, r"(\/((?>[^\/]*|(?1))*)\/)" => s"")   # clean /.../ -- statics
-                line = replace(line, r"(\(((?>[^()]++|(?1))*)\))" => s"") # braces and its containment
+                line = replace(line, r"(\(((?>[^()]++|(?1))*)\))" => s"")  # braces and its containment
                 line = replace(line, r"\*" => s"")
                 push!(matched, line)
             end
@@ -599,7 +596,6 @@ function processdostatements(code)
             length(s2) > 0 && (s2 *= " ")
             length(s6) > 0 && (s6 *= ":")
             success && (str = head * "for " * s2 * s3 * " = " * s4 * ":" * s6 * s5 * sc)
-            #println("for str: $str")
             insert!(lines, i, str)
         end
         i += 1
@@ -612,13 +608,13 @@ function parsedostatement(line)
     # "DO10,I=10,A(1,1)*TONUM('10,000'),-2" is the valid fortran 'DO' statement
     # https://docs.oracle.com/cd/E19957-01/805-4939/6j4m0vn8c/index.html
 
-    reflabel = ""
-    label = ""
-    countervar = "to save from GC"
-    position = 1
-    inbraces  = 0
-    nextarg = 0
-    starts = [0,0,0]
+    reflabel   = ""
+    label      = ""
+    countervar = ""
+    position   = 1
+    inbraces   = 0
+    nextarg    = 0
+    starts     = [0,0,0]
 
     while true
         ttype = picktoken(line, position)
@@ -687,7 +683,7 @@ function parsedostatement(line)
            strip(line[starts[1]:starts[2]-2]),
            strip(line[starts[2]:starts[3]-2]),
            strip(line[starts[3]:position-1]),
-           line[position:end] # possible trailing comment
+           line[position:end]                   # trailing comment
 end
 
 function processifstatements(code)
@@ -737,7 +733,6 @@ function parseifstatement(str, position)
     while true
         ttype = picktoken(str, position)
         #print("_$ttype")
-        #@show ttype, iftaken, inbraces, startcond, endcond, startexec, endexec
         if ttype == 'e' || ttype == '\n'
             break
         elseif ttype == ' '
@@ -769,7 +764,7 @@ function parseifstatement(str, position)
             else
                 wothen = true
                 endexec = position = skipupto('\n', str, position)
-                endexec = prevind(str, endexec) #endexec -= 1
+                endexec = prevind(str, endexec)
             end
         elseif ttype == '('
             inbraces += 1
@@ -787,7 +782,6 @@ function parseifstatement(str, position)
         end
     end
 
-    #@show startcond, endcond, startexec, endexec, afterthencomment
     return ncodeunits(str[position0:prevind(str,position)]), wothen,
            str[startcond:endcond], str[startexec:endexec], afterthencomment
 end
@@ -866,7 +860,7 @@ function parsereadwrite(str, position)
             elseif nextparam == 1
                 IU = lex
             else
-                @warn("processiostatements(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
+                @warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
                       " in FORTRAN line:\n\"$(strip(thisline(str, position)))\"\n")
             end
         elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
@@ -910,7 +904,7 @@ function parsereadwrite(str, position)
     if fmt == "*"
         fmt = ""
     else
-        fmt = replace(fmt, r"^\((.*)\)$"=>s"\1") # unenclose "()"
+        fmt = replace(fmt, r"^\((.*)\)$"=>s"\1") # it is unenclose "()"
     end
     fmt = foldl((a,b) -> a*','*b, map(strip, split(fmt, ",")))
 
@@ -933,6 +927,14 @@ function splitformat(str)
             position = skipwhitespaces(str, position)
         elseif ttype == ',' && inbraces == 0
             push!(lexemends, prevind(str, position))
+            position = skiptoken(str, position)
+            push!(lexemstarts, thisind(str, position))
+        elseif ttype == '/' && inbraces == 0
+            if position > lexemstarts[end]
+                push!(lexemends, prevind(str, position))
+                push!(lexemstarts, thisind(str, position))
+            end
+            push!(lexemends, thisind(str, position))
             position = skiptoken(str, position)
             push!(lexemstarts, thisind(str, position))
         elseif ttype == '('
@@ -1050,8 +1052,6 @@ function catchcontinuedlines(str, i)
     if isfixedformfortran && len>nextind(str,i,6) &&
        str[nextind(str,i):nextind(str,i,5)] == "     " && str[nextind(str,i,6)] != ' '
         return true, i, nextind(str,i,6)
-    ###if isfixedformfortran && len>i+6 && str[i+1:i+5] == "     " && str[i+6] != ' '
-    ###    return true, i, i+6
     elseif !isfixedformfortran && iscontinuedlinefreeform(str, i)
         # look behind for '&' at end of line
         return true, i, i
@@ -1188,21 +1188,18 @@ function collectlabels(code)
     gotolabels = Set{String}()
     rx = r"^\h*(?:do|for)\h+(\d+)\h+"i
     for i in axes(lines,1)
-        m = collect(eachmatch(rx, lines[i]))
-        length(m) > 0 && push!(dolabels, m[1].captures[1])
+        (m = match(rx, lines[i])) != nothing && push!(dolabels, m.captures[1])
     end
     rx = r"(?:^\h*|\W)go\h*?to\h+(\d+)$"i
     for i in axes(lines,1)
-        m = collect(eachmatch(rx, lines[i]))
-        length(m) > 0 && push!(gotolabels, m[1].captures[1])
+        (m = match(rx, lines[i])) != nothing && push!(gotolabels, m.captures[1])
     end
     # https://regex101.com/r/ba4wNU/2
     rx = r"(?:^\h*|\W)go\h*?to\h*\((\h*\d+\h*(?:\h*,\h*\d+\h*)*)\)\h*.*$"i
     #rx = r"(?:^\h*|\W)go\h*?to\h*\((\h*\d+\h*(?:\h*,(?:\n[ ]{5}[^ ])?\h*\d+\h*)*)\)\h*.*$"i
     for i in axes(lines,1)
-        m = collect(eachmatch(rx, lines[i]))
-        if length(m) > 0
-            labels = map(strip, split(m[1].captures[1], ','))
+        if (m = match(rx, lines[i])) != nothing
+            labels = map(strip, split(m.captures[1], ','))
             foreach(l->push!(gotolabels, l), labels)
         end
     end
@@ -1245,41 +1242,46 @@ end
 
 function replacedocontinue(code, dolabels, gotolabels)
     lines, comments = splitoncomment(code)
+
     # insert absent CONTINUE in LABEL SOMETHING
     # https://regex101.com/r/FG2iyI/4
-    rx = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
+    rxlabeled = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
+    rxcont = r"^(\h*(\d+)\h+)continue\h*"i
+    rxlabel = r"^(\h*(\d+)\h+)(.*?)$"i
     for i in axes(lines,1)
-        m = match(rx, lines[i])
-        if length(m) > 0 && m[1].captures[2] in dolabels
-            if m[1].captures[2] in gotolabels
-                # 'CYCLE' emulation in old fortran, may need some fixing
-                lines[i] = lines[i] * "\n" * " "^length(m[1].captures[1]) * "end do\n"
-            else
-                lines[i] = " "^length(m[1].captures[1]) * "end do"
+        if !isnothing(match(rxlabeled, lines[i])) && isnothing(match(rxcont, lines[i]))
+            m = match(rxlabel, lines[i])
+            if m.captures[2] in dolabels
+                lines[i] = " "^length(m.captures[1]) * replace(lines[i], rxlabel=>s"\3")
+                lines[i] = lines[i] * "\n" * m.captures[1] * "continue\n"
             end
-            pop!(dolabels, m[1].captures[2])
         end
     end
 
+    code1 = foldl((a,b) -> a*'\n'*b, map(*, lines, comments))
+    lines, comments = splitoncomment(code1)
+
     # replace 'LABEL CONTINUE' with 'end do'
-    rx = r"^(\h*(\d+)\h+)continue\h*"i
     for i in axes(lines,1)
-        m = collect(eachmatch(rx, lines[i]))
-        if length(m) > 0 && m[1].captures[2] in dolabels
-            if m[1].captures[2] in gotolabels
-                # 'CYCLE' emulation in old fortran, may need some fixing
-                lines[i] = lines[i] * "\n" * " "^length(m[1].captures[1]) * "end do\n"
-            else
-                lines[i] = " "^length(m[1].captures[1]) * "end do"
+        m = match(rxcont, lines[i])
+        if !isnothing(m) && m.captures[2] in dolabels
+            if m.captures[2] in gotolabels
+                # 'CYCLE' emulation in the old fortran
+                # here some risk to have 'GOTO LABEL' outside of the loop
+                rxgoto = Regex("go\\h*to\\h+"*m.captures[2], "i")
+                lines = map(a->replace(a, rxgoto => s"cycle"), lines)
+                pop!(gotolabels, m.captures[2])
             end
-            pop!(dolabels, m[1].captures[2])
+            lines[i] = " "^length(m.captures[1]) * "end do"
+            pop!(dolabels, m.captures[2])
         end
     end
+
     # non replaced LABELs should be fixed by hands
     rx = r"^(\h*(?:do|for)\h+)(\d+)(\h+.*)$"i
     for i in axes(lines,1)
-        m = collect(eachmatch(rx, lines[i]))
-        if length(m) > 0 && m[1].captures[2] in dolabels
+        m = match(rx, lines[i])
+        if !isnothing(m) && m.captures[2] in dolabels
             lines[i] = replace(lines[i], rx => s"\1FIXME: L\2\3")
         end
     end
@@ -1308,9 +1310,9 @@ function replacearraysbrackets(code, arrays)
     rx = r"(\[((?>[^\[\]]++|(?1))*)\])\h*(\(((?>[^\(\)]++|(?1))*)\))"
     code = replace(code, rx => s"\1[\4]")
 
-    # fix uncompleted ranges in square braces like [1:] and [:1], only one-dimension indices
+    # fix uncompleted ranges in square braces like [1:] and [:1]
     brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
-    #brackets = Regex("\\[((?>[^\\[\\],]++|(?0))*)\\]") # complementary brackets
+    # trim spaces around ':'
     rx = r"\[(.*|)([ ]+|):([ ]+|)(.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
@@ -1318,8 +1320,8 @@ function replacearraysbrackets(code, arrays)
             code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
         end
     end
+    # uppend with "end"
     rx = r"\[(.*[^,]):(,.*|)\]"
-    #rx = r"\[(.+):(,.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
@@ -1327,6 +1329,7 @@ function replacearraysbrackets(code, arrays)
                    code[o+length(m.match):end]
         end
     end
+    # prepend with '1'
     rx = r"\[:([^,].*)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
@@ -1354,8 +1357,9 @@ function collectformat(code)
             while iscontinued(lines[i], i<length(lines) ? lines[i+1] : "")
                 str = concatlines(str, lines[i+=1])
             end
-            m = match(rxextr, str)
-            if !isnothing(m) formats[m.captures[1]] = m.captures[2] end
+            if (m = match(rxextr, str)) != nothing
+                formats[m.captures[1]] = m.captures[2]
+            end
         end
         (i += 1) > length(lines) && break
     end
@@ -1366,18 +1370,23 @@ end
 function convertformat(formatstring)
     rep = r"^(\d+)(.*)$"
     FMT = OrderedDict(
+        r"^\/$"           => "\\n",               # / -> START NEW RECORD
+        r"^(\d*)P$"i      => "",                  # Scale Factor (P): scale from/to mantissa
         r"^A$"i           => s"%s",               # A -> %s
         r"^A(\d*)$"i      => s"%\1s",             # A9 -> %9s
         r"^I(\d*)$"i      => s"%\1i",             # I5 -> %5i
         r"^E(\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
+        r"^PE(\d*\.\d*)$"i => s"%\1E",            # E7.2 -> %7.2E Scientific format with Scale Factor P
         r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
         r"^X$"i           => s" ",                # X -> ' '
         r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
         r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
     )
     format = splitformat(formatstring)
+
+    # eval repeats in the format
     format2 = Vector{String}(undef, 0)
-    for (i,el) in enumerate(format) # eval repeats in the format
+    for (i,el) in enumerate(format)
         if occursin(rep, el)
             num = parse(Int, replace(el, rep=>s"\1"))
             str = replace(el, rep => s"\2")
@@ -1388,75 +1397,18 @@ function convertformat(formatstring)
         end
     end
     format = format2
+    # make conversion
     for rs in FMT
         format = map( a->replace(a, rs), format)
     end
     return foldl(*, format)
 end
 
-function includeformat1(code, format)
-    # https://regex101.com/r/auYywX/3 https://regex101.com/r/AA8YPY/2
-    rx = r"(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
-    #rx = r"^(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
-    lines = splitonlines(code)
-    for i in axes(lines,1)
-        m = match(rx, lines[i])
-        if !isnothing(m)
-            io = m.captures[4]
-            if  lowercase(m.captures[2]) == "read" && (m.captures[4] == "5" || m.captures[4] == "*")
-                io = "stdin"
-            elseif  lowercase(m.captures[2]) == "write" && (m.captures[4] == "6" || m.captures[4] == "*")
-                io = "stdout"
-            end
-            if  lowercase(m.captures[2]) == "read"
-                cmd = "READ"
-            elseif m.captures[6] == "*"
-                cmd = "println"
-            else
-                cmd = "@printf"
-            end
-            if m.captures[6] == "*"
-                ss = m.captures[1] * cmd * m.captures[3] * io * m.captures[5] * m.captures[8]
-            else
-                ss = m.captures[1] * cmd * m.captures[3] * io * m.captures[5] *
-                          '"' * format[m.captures[6]] * "\"," * m.captures[8]
-            end
-            lines[i] = replace(lines[i], rx=>ss)
-        end
-    end
-    return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
-end
-
-function enclosereadwrite(code)
-    rx = r"\h*\d*\h*(\bwrite\b|\bread\b)\h*\(\h*[\*\w]+\h*,[^)]+\).*"mi
-    #rx = r"^\h*\d*\h*(\bwrite\b|\bread\b)\h*\(\h*[\*\w]+\h*,[^)]+\).*"mi
-    lines, comments = splitoncomment(code)
-    for i in axes(lines,1)
-        if occursin(rx, lines[i])
-            j = i
-            while occursin(r",$", lines[j]) || occursin(r"&$", lines[j]) ||
-                  occursin(r"^[ ]{5}[^ ]", lines[min(j+1,end)])
-                j += 1
-            end
-            lines[j] = lines[j] * ")"
-        end
-    end
-    lines = map(*, lines, comments)
-    return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
-end
-
 function processcommon(code, commons, arrays)
     length(commons) == 0 && return code
-    #lines, comments = splitoncomment(code)
-    #for k in keys(commons)
-    #    for var in split(commons[k], ",")
-    #        w = Regex("\\b$(var)\\b","i") # whole word
-    #        ss = SubstitutionString("$(k).$(var)")
-    #        lines = map( a->replace(a, w=>ss), lines)
-    #    end
-    #end
-    #lines = map(*, lines, comments)
     lines = splitonlines(code)
+
+    # @unpack COMMONs before use
     rx = r"^(#(\h*)common\h*\/\h*(\w+)\h*\/\h*.+)"i
     for i in axes(lines,1)
         if (m = match(rx, lines[i])) != nothing && haskey(commons, m.captures[3])
@@ -1870,10 +1822,8 @@ const replacements = OrderedDict(
     r"^(.+[^ ])[ ]([ ]+)end$" => s"\1 end\2",
     # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
     r"(\b(?!elseif|if)[\w_]+\b)[\h]+\("i => s"\1(",
-    # Relace suberror with error and mark for fixup
+    # Replace suberror with error and mark for fixup
     r"(\W)suberror\((.*?),.*?\)" => s"\1 error(\2)",
-    # Mark #FIXME the various things this script can't handle
-    #r"(write|while\s)" => s"#FIXME \1",
     # Implicit declaration
     r"^\h*implicit(.*)"mi => s"",
 )
@@ -1911,7 +1861,7 @@ const removal = [
     #r"\n\s*character[*].*"i,
     #r"\n\s*parameter\s.*"i,
     r"\n\s*implicit none"i,
-    r"\n\s*real, external\s.*"i,
+    r"\n\s*real,\s*external\s.*"i,
     r"\n\s*external\s.*"i,
     r"\n\s*intrinsic\s.*"i,
     r"\n\s*contains\s.*"i,
