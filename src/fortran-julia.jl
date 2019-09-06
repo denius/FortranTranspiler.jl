@@ -56,18 +56,19 @@ function printusage()
         fortran-julia.jl **/*.[fF]*
 
     Options:
-        -h, --help       Show this screen.
-        --version        Show version.
-        -q, --quiet      Suppress all console output.
-        -v, --verbose    Be verbose.
-        -v, --verbose    Be more verbose.
-        --uppercase      Convert all identifiers to upper case.
-        --lowercase      Convert all identifiers to lower case.
-        --greeks         Replace the greeks letters names thats starts the vars names
-                         with corresponding unicode symbols, like DELTA1 -> δ1.
-        --subscripts     Replace tail suffixes in vars names like SOMEVAR_? with unicode subscripts, if exist.
-        --               The rest of the args is only the filenames.
-        --formatting     Try to format with JuliaFormatter package.
+        -h, --help         Show this screen.
+        --version          Show version.
+        -q, --quiet        Suppress all console output.
+        -v, --verbose      Be verbose.
+        -v, --verbose      Be more verbose.
+        --uppercase        Convert all identifiers to upper case.
+        --lowercase        Convert all identifiers to lower case.
+        --greeks           Replace the greeks letters names thats starts the vars names
+                           with corresponding unicode symbols, like DELTA1 -> δ1.
+        --subscripts       Replace tail suffixes in vars names like SOMEVAR_? with unicode subscripts, if exist.
+        --                 The rest of the args is only the filenames.
+        --formatting       Try to format with JuliaFormatter package.
+        --dontfixcontinue  Do not try to insert ommited CONTINUE in the ancient fortran DO LABEL loops.
         --returnnothing
         --packarrays
         --strings
@@ -113,12 +114,13 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     code = replace(code, r"^[ ]{0,5}\t"m => "      ")
     code = replace(code, r"\t"m => "  ")
 
-    # replace 'PRINT' => 'WRITE'
-    code = replace(code, r"(print)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)")
-
     global isfixedformfortran = !occursin(r"^[^cC*!\n][^\n]{0,3}[^\d\h\n]"m, code)
 
+    # replace some symbols with the watermarks
     code = savespecialsymbols(code)
+
+    # replace 'PRINT' => 'WRITE'
+    code = replace(code, r"(print)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)")
 
     # convert comments
     code = convertfortrancomments(code)
@@ -959,6 +961,7 @@ function splitformat(str)
 end
 
 function picktoken(str, i)
+    # may be there should be used `Base.Unicode.category_abbrev()` or `Base.Unicode.category_code()`
     islbrace(c::AbstractChar) = c=='(' || c=='['
     isrbrace(c::AbstractChar) = c==')' || c==']'
     len = ncodeunits(str)
@@ -1240,34 +1243,35 @@ function processconditionalgotos(code)
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
 end
 
-function replacedocontinue(code, dolabels, gotolabels)
+function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
     lines, comments = splitoncomment(code)
-
-    # insert absent CONTINUE in LABEL SOMETHING
     # https://regex101.com/r/FG2iyI/4
     rxlabeled = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
     rxcont = r"^(\h*(\d+)\h+)continue\h*"i
     rxlabel = r"^(\h*(\d+)\h+)(.*?)$"i
-    for i in axes(lines,1)
-        if !isnothing(match(rxlabeled, lines[i])) && isnothing(match(rxcont, lines[i]))
-            m = match(rxlabel, lines[i])
-            if m.captures[2] in dolabels
-                lines[i] = " "^length(m.captures[1]) * replace(lines[i], rxlabel=>s"\3")
-                lines[i] = lines[i] * "\n" * m.captures[1] * "continue\n"
+
+    # insert absent CONTINUE in LABEL SOMETHING
+    if !dontfixcontinue
+        for i in axes(lines,1)
+            if !isnothing(match(rxlabeled, lines[i])) && isnothing(match(rxcont, lines[i]))
+                m = match(rxlabel, lines[i])
+                if m.captures[2] in dolabels
+                    lines[i] = " "^length(m.captures[1]) * replace(lines[i], rxlabel=>s"\3")
+                    lines[i] = lines[i] * "\n" * m.captures[1] * "continue\n"
+                end
             end
         end
+        code1 = foldl((a,b) -> a*'\n'*b, map(*, lines, comments))
+        lines, comments = splitoncomment(code1)
     end
-
-    code1 = foldl((a,b) -> a*'\n'*b, map(*, lines, comments))
-    lines, comments = splitoncomment(code1)
 
     # replace 'LABEL CONTINUE' with 'end do'
     for i in axes(lines,1)
         m = match(rxcont, lines[i])
         if !isnothing(m) && m.captures[2] in dolabels
             if m.captures[2] in gotolabels
-                # 'CYCLE' emulation in the old fortran
-                # here some risk to have 'GOTO LABEL' outside of the loop
+                # 'CYCLE' emulation in the old fortran,
+                # beware to have 'GOTO LABEL' outside of the loop
                 rxgoto = Regex("go\\h*to\\h+"*m.captures[2], "i")
                 lines = map(a->replace(a, rxgoto => s"cycle"), lines)
                 pop!(gotolabels, m.captures[2])
@@ -1277,7 +1281,7 @@ function replacedocontinue(code, dolabels, gotolabels)
         end
     end
 
-    # non replaced LABELs should be fixed by hands
+    # not replaced LABELs should be fixed by hands
     rx = r"^(\h*(?:do|for)\h+)(\d+)(\h+.*)$"i
     for i in axes(lines,1)
         m = match(rx, lines[i])
@@ -1642,14 +1646,14 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
     # https://regex101.com/r/J5ViSG/1
     r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n\n     \\3\\4"),
-    # array repeating statement https://regex101.com/r/R9g9aU/3 for READ/WRITE and DATA
+    # array repeating statement https://regex101.com/r/R9g9aU/7 for READ/WRITE and DATA
     # complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
-    r"\(([\w]+)\(\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    r"\(([\w]+)\[\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    r"\(([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
-    r"\(([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
-    r"\(([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
-    r"\(([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
+    r"\(\h*([\w]+)\(\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    r"\(\h*([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    r"\(\h*([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
+    r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
 )
 
 const singlewordreplacements = OrderedDict(
@@ -1868,5 +1872,17 @@ const removal = [
     # Import statements
     r"\n\s*use\s.*"i,
 ]
+
+function trytoinclude(mask::AbstractString = "*.jl")
+    files = glob(mask)
+    for f in files
+        try
+            include(f)
+        catch e
+            @error("in \"$f\":\n$e\n")
+        end
+    end
+    return nothing
+end
 
 main(ARGS)
