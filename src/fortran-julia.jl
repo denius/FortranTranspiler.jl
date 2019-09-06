@@ -304,7 +304,7 @@ function markbysubroutine(code)
     rx = r"^(\h*)((?:[\w*\h]+\h+)function|(?:recursive\h+|)subroutine|program|block\h*data|module)\h*.*$"mi
     marked = Vector{Int}(undef, 0)
     names  = Vector{String}(undef, 0)
-    for i = 1:length(lines)
+    for i in axes(lines,1)
         if occursin(rx, lines[i])
             push!(marked, i)
             push!(names, match(rx, lines[i]).match)
@@ -343,7 +343,7 @@ function stripcomments(code)
     juliacomments = r"(#=([^*]|\*(?!#))*?=#|#[^\"\n\r]*(?:\"[^\"\n\r]*\"[^\"\n\r]*)*[\r\n])(?=[^\"]*(?:\"[^\"]*\"[^\"]*)*$)"m
     dlms = [r"#"m]
     lines = splitonlines(code)
-    for i = 1:length(lines)
+    for i in axes(lines,1)
         for dlm in dlms
             lines[i] = split(lines[i], dlm, limit=2, keepempty=true)[1]
         end
@@ -355,8 +355,8 @@ end
 function splitoncomment(code)
     rx = r"\h*#.*$"
     lines = splitonlines(code)
-    comments  = ["" for i=1:length(lines)]
-    for i = 1:length(lines)
+    comments  = ["" for i=axes(lines,1)]
+    for i in axes(lines,1)
         (m = match(rx, lines[i])) != nothing && (comments[i] = m.match)
         lines[i] = replace(lines[i], rx => s"")
     end
@@ -408,10 +408,10 @@ function splitonlines(code)
     return lines
 end
 
-function printlines(list)
+function printlines(lines)
     print("\n")
-    #for (i,l) in enumerate(list) print("$l\n") end
-    for (i,l) in enumerate(list) print("line[$i]: \"$l\"\n") end
+    #for (i,l) in enumerate(lines) print("$l\n") end
+    for (i,l) in enumerate(lines) print("line[$i]: \"$l\"\n") end
 end
 
 function commentoutdeclarations(code)
@@ -553,7 +553,7 @@ function collectcommon(code)
 
     rx = r"^\h*common\h*\/\h*(\w+)\h*\/\h*(.+)"mi
     matched = Dict{String,String}()
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         m = match(rx, lines[i])
         if !isnothing(m) matched[m.captures[1]] = m.captures[2] end
     end
@@ -1187,19 +1187,19 @@ function collectlabels(code)
     dolabels = Set{String}()
     gotolabels = Set{String}()
     rx = r"^\h*(?:do|for)\h+(\d+)\h+"i
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         m = collect(eachmatch(rx, lines[i]))
         length(m) > 0 && push!(dolabels, m[1].captures[1])
     end
     rx = r"(?:^\h*|\W)go\h*?to\h+(\d+)$"i
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         m = collect(eachmatch(rx, lines[i]))
         length(m) > 0 && push!(gotolabels, m[1].captures[1])
     end
     # https://regex101.com/r/ba4wNU/2
     rx = r"(?:^\h*|\W)go\h*?to\h*\((\h*\d+\h*(?:\h*,\h*\d+\h*)*)\)\h*.*$"i
     #rx = r"(?:^\h*|\W)go\h*?to\h*\((\h*\d+\h*(?:\h*,(?:\n[ ]{5}[^ ])?\h*\d+\h*)*)\)\h*.*$"i
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         m = collect(eachmatch(rx, lines[i]))
         if length(m) > 0
             labels = map(strip, split(m[1].captures[1], ','))
@@ -1245,9 +1245,25 @@ end
 
 function replacedocontinue(code, dolabels, gotolabels)
     lines, comments = splitoncomment(code)
+    # insert absent CONTINUE in LABEL SOMETHING
+    # https://regex101.com/r/FG2iyI/4
+    rx = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
+    for i in axes(lines,1)
+        m = match(rx, lines[i])
+        if length(m) > 0 && m[1].captures[2] in dolabels
+            if m[1].captures[2] in gotolabels
+                # 'CYCLE' emulation in old fortran, may need some fixing
+                lines[i] = lines[i] * "\n" * " "^length(m[1].captures[1]) * "end do\n"
+            else
+                lines[i] = " "^length(m[1].captures[1]) * "end do"
+            end
+            pop!(dolabels, m[1].captures[2])
+        end
+    end
+
     # replace 'LABEL CONTINUE' with 'end do'
     rx = r"^(\h*(\d+)\h+)continue\h*"i
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         m = collect(eachmatch(rx, lines[i]))
         if length(m) > 0 && m[1].captures[2] in dolabels
             if m[1].captures[2] in gotolabels
@@ -1261,7 +1277,7 @@ function replacedocontinue(code, dolabels, gotolabels)
     end
     # non replaced LABELs should be fixed by hands
     rx = r"^(\h*(?:do|for)\h+)(\d+)(\h+.*)$"i
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         m = collect(eachmatch(rx, lines[i]))
         if length(m) > 0 && m[1].captures[2] in dolabels
             lines[i] = replace(lines[i], rx => s"\1FIXME: L\2\3")
@@ -1383,7 +1399,7 @@ function includeformat1(code, format)
     rx = r"(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
     #rx = r"^(\h*\d*\h*)(\bwrite\b|\bread\b)(\h*\(\h*)([\*\w]+)(\h*,\h*)([*]|\d+)(\h*(?:,\h*[ =\w]+\h*)*\))(\h*.*)"mi
     lines = splitonlines(code)
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         m = match(rx, lines[i])
         if !isnothing(m)
             io = m.captures[4]
@@ -1415,7 +1431,7 @@ function enclosereadwrite(code)
     rx = r"\h*\d*\h*(\bwrite\b|\bread\b)\h*\(\h*[\*\w]+\h*,[^)]+\).*"mi
     #rx = r"^\h*\d*\h*(\bwrite\b|\bread\b)\h*\(\h*[\*\w]+\h*,[^)]+\).*"mi
     lines, comments = splitoncomment(code)
-    for i in 1:length(lines)
+    for i in axes(lines,1)
         if occursin(rx, lines[i])
             j = i
             while occursin(r",$", lines[j]) || occursin(r"&$", lines[j]) ||
@@ -1492,7 +1508,7 @@ function markbypattern(patterns, code)
     lines = splitonlines(lines)
     marked = Set{Int}()
     for rx in patterns
-        for i = 1:length(lines)
+        for i in axes(lines,1)
             occursin(rx, lines[i]) && push!(marked, i)
         end
     end
@@ -1522,7 +1538,7 @@ function processselectcase(code)
     lines = splitonlines(code)
     var = ""
     case1 = false
-    for i = 1:length(lines)
+    for i in axes(lines,1)
         if occursin(r"select\h+case"i, lines[i])
             expr = replace(lines[i], r"^\h*select\h+case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
             if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
@@ -1674,14 +1690,14 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
     # https://regex101.com/r/J5ViSG/1
     r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n\n     \\3\\4"),
-    # array repeating statement https://regex101.com/r/R9g9aU/2 for READ/WRITE and DATA
+    # array repeating statement https://regex101.com/r/R9g9aU/3 for READ/WRITE and DATA
     # complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
-    r"\(([^)]+)\(([^()]+)\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    r"\(([^)]+)\[([^\[\]]+)\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    r"\(([^)]+)\(([^()]+),([^()]+)\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
-    r"\(([^)]+)\[([^\[\]]+),([^\[\]]+)\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
-    r"\(([^)]+)\(([^()]+),([^()]+)\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\2)"),
-    r"\(([^)]+)\[([^\[\]]+),([^\[\]]+)\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*)\)"mi => @s_str("view(\\1, \\5:\\6, \\2)"),
+    r"\(([\w]+)\(\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    r"\(([\w]+)\[\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    r"\(([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    r"\(([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    r"\(([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
+    r"\(([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
 )
 
 const singlewordreplacements = OrderedDict(
@@ -1730,20 +1746,20 @@ const singlewordreplacements = OrderedDict(
     # https://gcc.gnu.org/onlinedocs/gcc-9.2.0/gfortran/Intrinsic-Procedures.html
     # https://docs.oracle.com/cd/E19957-01/805-4939/6j4m0vnc8/index.html
     r"\bmod\b\h*\("i => s"mod(",
-    r"\bsqrt\b\h*\("i => s"sqrt(",
-    r"\bexp\b\h*\("i => s"exp(",
-    r"\blog\b\h*\("i => s"log(",
-    r"\blog10\b\h*\("i => s"log10(",
+    r"\bd?sqrt\b\h*\("i => s"sqrt(",
+    r"\bd?exp\b\h*\("i => s"exp(",
+    r"\bd?log\b\h*\("i => s"log(",
+    r"\bd?log10\b\h*\("i => s"log10(",
     r"\bd?conjg\b\h*\("i => s"conj(",
     r"\b[da]?imag\b\h*\("i => s"imag(",
     r"\bd?sign\b\("i => "copysign(",
-    r"\bd?max\b\h*\("i => "max(",
-    r"\bd?min\b\h*\("i => "min(",
+    r"\bd?max1?\b\h*\("i => "max(",
+    r"\bd?min1?\b\h*\("i => "min(",
     r"\bd?abs\b\h*\("i => "abs(",
-    r"\bsin\b\h*\("i => "sin(",
-    r"\basin\b\h*\("i => "asin(",
-    r"\bcos\b\h*\("i => "cos(",
-    r"\bacos\b\h*\("i => "acos(",
+    r"\bd?sin\b\h*\("i => "sin(",
+    r"\bd?asin\b\h*\("i => "asin(",
+    r"\bd?cos\b\h*\("i => "cos(",
+    r"\bd?acos\b\h*\("i => "acos(",
     r"\bd?tan\b\h*\("i => "tan(",
     r"\bd?atan2?\b\h*\("i => "atan(",
     r"\b(i[dq])?nint\b\h*\("i => "round(Int,",
@@ -1755,6 +1771,9 @@ const singlewordreplacements = OrderedDict(
     r"\bdfloat\b\h*\("i => "float(",
     r"\bcmplx\b\h*\("i => "ComplexF32(", # ?
     r"\bdcmplx\b\h*\("i => "complex(",
+    r"\brand\b\h*\(\)"i => "rand()",
+    # https://regex101.com/r/whrGry/2
+    r"(?:\brand\b\h*)(\(((?>[^()\n]+|(?1))+)\))"i => s"rand(MersenneTwister(round(Int,\2)))",
     r"\blen\b\h*\("i => "length(",
     # https://regex101.com/r/whrGry/1
     r"(?:\blen_trim\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
@@ -1822,6 +1841,8 @@ const replacements = OrderedDict(
     # Fix assignments
     r"(?<=[^\s=<>!/\\])=(?=[^\s=])" => " = ",
     #r"(?<=[^\s=])=(?=[^\s=])" => " = ",
+    # splatting view() in print: https://regex101.com/r/SPfeco/3
+    r"((?:\bat_iZjAcpPokMprintf\b|\bprintln\b).*?(?:\bview\b\h*))(\(((?>[^()]++|(?2))*)\))" => s"\1\2...",
     # Remove expression's brackets after if/elseif/while https://regex101.com/r/eF9bK5/17
     r"^(\h*)(if|elseif|while)(\h*)(\(((?>[^()]++|(?4))*)\))\h*$"m => s"\1\2\3\5",
     # Process PARAMETER
