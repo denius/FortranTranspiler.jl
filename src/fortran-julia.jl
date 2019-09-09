@@ -12,23 +12,25 @@ using DataStructures, Printf, JuliaFormatter
     * julia's `for` loop counter is local scope variable, unlike fortran.
       Thus the codes that use the value of counter after the loop will be broken
       and should be fixed via `while` loop.
-    * due to julia's GC, some variables initialized inside the loop/if blocks may disappear
-      upon they exit these blocks. Consider initilizing them with the appropriate value in
-      the initial part of the function code.
-    * all strings in fortran are `Vector{Char}` and should stay same type to preserve
-      assignment statements. (use `join` and `collect` to convert to strings and back)
-    * whitespaces matter despite of the old fortran, which can ignore them all:
-    ** in julia whitespaces between name of functions/arrays and braces are not allowed.
+    * due to julia's GC, some implicit variables initialized inside the loop/if blocks
+      may disappear upon they exit these blocks. Consider initilizing them with
+      the appropriate value in the initial part of the function code.
     * julia can't propagate back changed values of scalars via functions args, unlike fortran.
       Thus such changed scalars should be returned via functions `return` statement.
+    * fortran functions returns the result via assignment the returned
+      to variable with function's self name, in julia it is the reassignment,
+      thus should be fixed
+    * all strings in fortran are `Vector{Char}` and should stay same type to preserve
+      assignment statements. (Use `join()` and `collect()` to convert to strings and back)
+    * whitespaces matter despite of the old fortran, which can ignore them all:
+    ** in julia whitespaces between name of functions/arrays and braces are not allowed.
+    ** whitespaces in brackets is unwanted (due to https://github.com/JuliaLang/julia/issues/14853)
     * some unserviceable comments are cutted off (eg. in expanded lines continuations).
-    * this script is mostly for fixed-form fortran and free-form is not tested yet.
+    * this script is mostly for the fixed-form fortran and in the free-form is not tested yet.
     * in the `DATA` statement can occur uncatched repetitions like `DATA SOMEARRAY/8*0,1,2/`
     * `READ`/`WRITE` is ugly
-    * can't substitude dynamic - created at runtime FORMAT string
-    * `FORMAT` is incorrect sometimes
-    * fortran functions returns result via assignment the returned to function name,
-      in julia it is the reassignment, thus should be fixed
+    * `@printf` can't use dynamic (changed at runtime) FORMAT string
+    * 'FORMAT' conversion is unaccomplished
 
 # TODO
     return intent(out):
@@ -123,6 +125,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     code = replace(code, r"(print)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)")
 
     # convert comments
+    isfixedformfortran && (code = replace(code, r"(\n[ ]{5})!"m => s"\1."))
     code = convertfortrancomments(code)
 
     # mark lines of code occupied by each subroutine
@@ -165,9 +168,12 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code = processiostatements(code, formats)
 
+        #write("test.jl", code)
+        code, strings = saveallstrings(code)
+        #@show strings
+
         code = processifstatements(code)
 
-        #write("test.jl", code)
         # process multiline replacements
         for rx in multilinereplacements
             code = replace(code, rx)
@@ -198,6 +204,10 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         end
         #write("test.jl", foldl((a,b) -> a*'\n'*b, lines))
 
+        # strip all whitespaces inside brackets due
+        # https://github.com/JuliaLang/julia/issues/14853
+        lines = stripwhitesinbrackets(lines)
+
         # append comments back
         lines = map(*, lines, comments)
 
@@ -215,6 +225,9 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
             code = replace(code, rx => "")
         end
 
+        #write("test.jl", code)
+        # restore saved tokens
+        code = foldl(replace, collect(strings), init=code)
         code = restorespecialsymbols(code)
 
         try
@@ -310,8 +323,9 @@ function markbysubroutine(code)
         end
     end
 
-    rx = r"^\h*end\h*(?!do|if)"i
-    #rx = r"^\h*end\h*(?:(function|subroutine|program|module|)\h*\w*)"i
+    rx = r"^\h*(end\h*(?!do|if)|\bcontains\b)"i
+    #rx = r"^\h*end\h*(?!do|if)"i
+    ##rx = r"^\h*end\h*(?:(function|subroutine|program|module|)\h*\w*)"i
     marked = sort(collect(marked))
     for i = length(marked):-1:2
         for j = marked[i]:-1:marked[i-1]
@@ -388,8 +402,8 @@ end
 function concatlinecontinuation(code)
     # Note: trailing comments are not allowed here
     replacements = OrderedDict(
-        r"\n     [.+&$\w]\h*" => "",  # fixed-form startline continuations
-        r"&\n"                => ""   # free-form continuations
+        r"\n     [.+&$\w]\h*" => " ",  # fixed-form startline continuations
+        r"&\n"                => ""    # free-form continuations
     )
     code1 = deepcopy(code)
     for rx in replacements
@@ -421,18 +435,23 @@ function commentoutdeclarations(code)
         r"^\h*dimension\h+"mi,
         r"^\h*implicit\h*\w+"mi,
         r"^\h*real.*::"mi,
+        r"^\h*real\h*$"mi,
         r"^\h*real\h+(?!.*function)"mi, # https://regex101.com/r/CFiiOx/1
         r"^\h*real\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*double\h*precision.*::"mi,
+        r"^\h*double\h*precision\h*$"mi,
         r"^\h*double\h*precision\h+(?!.*function)"mi,
         r"^\h*complex.*::"mi,
+        r"^\h*complex\h*$"mi,
         r"^\h*complex\h+(?!.*function)"mi,
         r"^\h*complex\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*integer.*::"mi,
+        r"^\h*integer\h*$"mi,
         r"^\h*integer\h+(?!.*function)"mi,
         r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*integer\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
         r"^\h*character.*::"mi,
+        r"^\h*character\h*$"mi,
         r"^\h*character\h+(?!.*function)"mi,
         r"^\h*character\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
         r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
@@ -442,7 +461,9 @@ function commentoutdeclarations(code)
         r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*external\h+"mi,
         r"^\h*logical.*::"mi,
+        r"^\h*logical\h*$"mi,
         r"^\h*logical\h+(?!.*function)"mi,
+        r"^\h*allocatable\h+"mi,
         r"^\h*entry\h+.*"mi,
         r"^\h+\d+\h+format\h*\("mi
     ]
@@ -505,6 +526,7 @@ function collectvars(code)
     # add undoubted arrays
     # Note: to any fortran 'CHARACTER' can be applied get index operator: 'C(:1)'
     patterns = [r"^\h*.*dimension\h*\(.+\)\h*::\h*"mi,
+               r"^\h*allocatable\h+"mi,
                r"^\h*character\h+"mi,
                r"^\h*character\*\h+"mi,
                r"^\h*character\*\d+\h+"mi,
@@ -594,10 +616,10 @@ function processdostatements(code)
             end
             splice!(lines, i)
             # replace with new julia's `for` statement
-            success,s1,s2,s3,s4,s5,s6,sc = parsedostatement(str)
-            length(s2) > 0 && (s2 *= " ")
-            length(s6) > 0 && (s6 *= ":")
-            success && (str = head * "for " * s2 * s3 * " = " * s4 * ":" * s6 * s5 * sc)
+            success,s1,lbl,var,ex1,ex2,ex3,com = parsedostatement(str)
+            length(lbl) > 0 && (lbl *= " ")
+            length(ex3) > 0 && (ex3 *= ":")
+            success && (str = head * "for " * lbl * var * " = " * ex1 * ":" * ex3 * ex2 * com)
             insert!(lines, i, str)
         end
         i += 1
@@ -1231,9 +1253,10 @@ function processconditionalgotos(code)
             ifexpr = "" * head
             for (i,g) = enumerate(gotos)
                 ifexpr *= "if ($(var) .eq. $(i)) then\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
-                #ifexpr *= "if ($(var) == $(i))\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
             end
-            ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label $(var)=\\'\$($(var))\\' in goto list\")\n$(head)end\n"
+            ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label " *
+                      "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
+                      "in goto list\")\n$(head)end\n"
             #println("ifexpr: $ifexpr")
             insert!(lines, i, ifexpr)
         end
@@ -1344,6 +1367,77 @@ function replacearraysbrackets(code, arrays)
     return code
 end
 
+"""
+replace the saved all strings with its keys
+"""
+function saveallstrings(code)
+
+    # save escaped "\""
+    #code = replace(code, r"[\\][\"]" => "quote_iZjAcpPokM") # who did that?
+
+    strings = OrderedDict{String, String}()
+    lines, comments = splitoncomment(code)
+    codeline = foldl((a,b) -> a*'\n'*b, lines)
+    comment  = foldl((a,b) -> a*'\n'*b, comments)
+
+    # save all strings in comments as is
+    rxstr = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rxstr, comment)))
+        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
+        strings[key] = m.captures[1]
+        comment = replace(comment, m.match => key)
+    end
+    rxstr = r"(\"((?>[^\"\n]*|(?1))*)\")"m
+    for m in reverse(collect(eachmatch(rxstr, comment)))
+        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
+        strings[key] = m.captures[1]
+        comment = replace(comment, m.match => key)
+    end
+
+    # replace 'strings' with "strings" in code
+    rxstr = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rxstr, codeline)))
+        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
+        if length(m.captures[1]) > 3 || length(m.captures[1]) == 2
+            strings[key] = '"' * m.captures[2] * '"'
+            codeline = replace(codeline, m.match => key)
+        else # 'X' -- some symbol
+            strings[key] = m.captures[1]
+            codeline = replace(codeline, m.match => key)
+        end
+    end
+    rxstr = r"(\"((?>[^\"\n]*|(?1))*)\")"m
+    for m in reverse(collect(eachmatch(rxstr, codeline)))
+        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
+        strings[key] = m.captures[1]
+        codeline = replace(codeline, m.match => key)
+    end
+
+    code1 = foldl((a,b) -> a*'\n'*b, map(*, splitonlines(codeline), splitonlines(comment)))
+
+    return code1, strings
+end
+
+function restoreallstrings(code, strings)
+    code = foldl(replace, collect(strings), init=code)
+    #code = reduce(replace, collect(strings), init=code)
+    return code
+end
+
+function stripwhitesinbrackets(lines)
+    code = lines isa AbstractVector ? foldl((a,b) -> a*'\n'*b, lines) : deepcopy(lines)
+    brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
+    # trim spaces inside
+    for m in reverse(collect(eachmatch(brackets, code)))
+        o = m.offset
+        code = code[1:prevind(code,o)] *
+               replace(m.match, " " => "") *
+               code[thisind(code,o+length(m.match)):end]
+        #code = code[1:o-1] * replace(m.match, " " => "") * code[o+length(m.match):end]
+    end
+    return lines isa AbstractVector ? split(code, '\n') : code
+end
+
 function collectformat(code)
     code1 = stripcomments(code)
     code1 = concatlinecontinuation(code1)
@@ -1379,10 +1473,16 @@ function convertformat(formatstring)
         r"^A$"i           => s"%s",               # A -> %s
         r"^A(\d*)$"i      => s"%\1s",             # A9 -> %9s
         r"^I(\d*)$"i      => s"%\1i",             # I5 -> %5i
+        r"^I(\d+)\.(\d+)$"i      => s"%0\1i",     # I5.5 -> %05i there can be mistake if \2>\1
         r"^E(\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
+        r"^ES(\d*\.\d*)$"i => s"%\1E",            # ES7.2 -> %7.2E ???
         r"^PE(\d*\.\d*)$"i => s"%\1E",            # E7.2 -> %7.2E Scientific format with Scale Factor P
+        r"^P1E(\d*\.\d*)$"i => s"%\1E",           # E7.2 -> %7.2E
+        r"^P2E(\d*\.\d*)$"i => s"%\1E%\1E",       # E7.2 -> %7.2E ??? is it right?
+        r"^P3E(\d*\.\d*)$"i => s"%\1E%\1E%\1E",   # E7.2 -> %7.2E
         r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
         r"^X$"i           => s" ",                # X -> ' '
+        r"^T\d*$"i           => s" ",             # Tx -> ' ' : move to absolute position (column) x
         r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
         r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
     )
@@ -1617,18 +1717,25 @@ function savespecialsymbols(code)
         str = replace(m.match, r"\"" => "quote_iZjAcpPokM")
         code = replace(code, m.match => str)
     end
+    # save '\\' inside strings
+    rx = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = replace(m.match, r"[\\]" => "slashsymbol_iZjAcpPokM")
+        code = replace(code, m.match => str)
+    end
     code  = replace(code, r"#" => "sha_iZjAcpPokM")
     code  = replace(code, r"@" =>  "at_iZjAcpPokM")
     return code
 end
 function restorespecialsymbols(code)
     # restore saved symbols
-    code = replace(code,      r"sha_iZjAcpPokM" => "#")
-    code = replace(code,       r"at_iZjAcpPokM" => "@")
-    code = replace(code,     r"bang_iZjAcpPokM" => "!")
-    code = replace(code,    r"quote_iZjAcpPokM" => "\\\"")
-    code = replace(code, r"GhUtwoap_iZjAcpPokM" => "'")
-    code = replace(code,  r"lastpos_iZjAcpPokM" => "end")
+    code = replace(code,        r"sha_iZjAcpPokM"  => "#")
+    code = replace(code,         r"at_iZjAcpPokM"  => "@")
+    code = replace(code,       r"bang_iZjAcpPokM"  => "!")
+    code = replace(code,      r"quote_iZjAcpPokM"  => "\\\"")
+    code = replace(code,   r"GhUtwoap_iZjAcpPokM"  => "'")
+    code = replace(code,    r"lastpos_iZjAcpPokM"  => "end")
+    code = replace(code,r"slashsymbol_iZjAcpPokM"  => "\\\\")
     return code
 end
 
@@ -1648,6 +1755,8 @@ const multilinereplacements = OrderedDict(
     r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n\n     \\3\\4"),
     # array repeating statement https://regex101.com/r/R9g9aU/7 for READ/WRITE and DATA
     # complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
+    #r"\(\h*([\w]+)\([\h\w+/*-]*([^()]+)[\h\w+/*-]*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    #r"\(\h*([\w]+)\[[\h\w+/*-]*([^\[\]]+)[\h\w+/*-]*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
     r"\(\h*([\w]+)\(\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
     r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
     r"\(\h*([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
@@ -1727,6 +1836,7 @@ const singlewordreplacements = OrderedDict(
     r"\bdfloat\b\h*\("i => "float(",
     r"\bcmplx\b\h*\("i => "ComplexF32(", # ?
     r"\bdcmplx\b\h*\("i => "complex(",
+    r"\bkind\b\h*\("i => "sizeof(",
     r"\brand\b\h*\(\)"i => "rand()",
     # https://regex101.com/r/whrGry/2
     r"(?:\brand\b\h*)(\(((?>[^()\n]+|(?1))+)\))"i => s"rand(MersenneTwister(round(Int,\2)))",
@@ -1734,10 +1844,11 @@ const singlewordreplacements = OrderedDict(
     # https://regex101.com/r/whrGry/1
     r"(?:\blen_trim\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
 
-    r"\bMPI_SEND\b"i  => "MPI.Send",
-    r"\bMPI_ISEND\b"i => "MPI.Isend",
-    r"\bMPI_RECV\b"i  => "MPI.Recv!",
-    r"\bMPI_IRECV\b"i => "MPI.Irecv!",
+    r"\bMPI_SEND\b\h*\("i  => "MPI.Send(",
+    r"\bMPI_ISEND\b\h*\("i => "MPI.Isend(",
+    r"\bMPI_RECV\b\h*\("i  => "MPI.Recv!(",
+    r"\bMPI_IRECV\b\h*\("i => "MPI.Irecv!(",
+    r"\bMPI_WTIME\b\h*\("i => "MPI.Wtime(",
 
     # LSAME
     r"\bLSAME\b\h*\("i => "LSAME(",
@@ -1778,12 +1889,12 @@ const replacements = OrderedDict(
     r"@(?!label)" => ",",
     # Replace XXXXXX with xxxxxx
     r"(\h*)\breturn\b(\h+end|)$"i => s"\1return nothing\2",
-    # include
-    r"^(\s*)include\h+\"(.*)([.][^.]+)\"(\h*#.*|\h*)$"mi => s"\1include(\"\2.jl\")\4",
+    # include ESCAPEDSTR
+    r"^(\s*)include\h+([\w]+)$"mi => s"\1include(\2)",
     # Replace do LABEL ... -> do ...
     r"for\h+(?:\d+)(\h+.*)$" => s"for\1",
     # Replace do while -> while
-    r"do\h+while"i => s"while",
+    r"do\h+while\h*"i => s"while ",
     r"^(\h*)\bdo\b\h*$"i => s"\1while true",
     # Replace ELSE with else
     #r"^(\s*)ELSE"m => s"\1else",
@@ -1830,12 +1941,16 @@ const replacements = OrderedDict(
     r"(\W)suberror\((.*?),.*?\)" => s"\1 error(\2)",
     # Implicit declaration
     r"^\h*implicit(.*)"mi => s"",
+    # main program
+    r"^(\h*)program\h*$"mi => s"\1PROGRAM NAMELESSPROGRAM",
+    # rstrip()
+    r"\h*$" => s"", 
 )
 
 const headersprocessing = OrderedDict(
     # Reorganise functions and doc strings. This may be very project specific.
     # https://regex101.com/r/DAIHhl/1
-    r"(\h+)subroutine(\h+)(\w+)(\(([^)]*)\))(\h*#.*?|\h*)\n(#\h*\n)?#\h*function:\h*(.*?)#\h*\n"is =>
+    r"^(\h+)subroutine(\h+)(\w+)(\(([^)]*)\))(\h*#.*?|\h*)\n(#\h*\n)?#\h*function:\h*(.*?)#\h*\n"is =>
     SubstitutionString("\"\"\"\n    \\3(\\5)\n\n\\8\"\"\"\nfunction \\3(\\5)\n#\n"),
     # Simple subroutine
     r"^\h*(?:recursive\h+|)subroutine\h+(\w+)\h*\("mi => s"function \1(",
