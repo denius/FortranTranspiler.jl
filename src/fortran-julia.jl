@@ -4,7 +4,17 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
     "${BASH_SOURCE[0]}" "$@"
 =#
 
-using DataStructures, Printf, JuliaFormatter
+#=
+try
+  using DataStructures
+catch
+  import Pkg
+  Pkg.add("DataStructures")
+  using DataStructures
+end
+=#
+
+using DataStructures, Printf, Espresso, JuliaFormatter
 
 #=
 
@@ -31,6 +41,7 @@ using DataStructures, Printf, JuliaFormatter
     * `READ`/`WRITE` is ugly
     * `@printf` can't use dynamic (changed at runtime) FORMAT string
     * 'FORMAT' conversion is unaccomplished
+    * implied do-loops not always catched
 
 # TODO
     return intent(out):
@@ -107,6 +118,8 @@ isfixedformfortran = true
 function convertfromfortran(code; casetransform=identity, quiet=true,
                             verbose=false, veryverbose=false)
 
+    # ORDER OF FUNCTIONS IS MATTER
+
     # should be '\n' newlines only
     for rx in newlinereplacements
         code = replace(code, rx)
@@ -127,6 +140,12 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     # convert comments
     isfixedformfortran && (code = replace(code, r"(\n[ ]{5})!"m => s"\1."))
     code = convertfortrancomments(code)
+
+    # case conversion
+    if casetransform != identity
+        lines, comments = splitoncomment(code)
+        code = foldl((a,b) -> a*'\n'*b, map(*, map(casetransform, lines), comments))
+    end
 
     # mark lines of code occupied by each subroutine
     subs, subnames = markbysubroutine(code)
@@ -153,10 +172,11 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code, formats = collectformat(code)
         veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
-        #formats = map(convertformat, formats)
 
         # comment out all vars declarations
         code = commentoutdeclarations(code)
+
+        code, commentstrings = savecomments(code)
 
         code = processcommon(code, commons, arrays)
 
@@ -164,37 +184,33 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         dolabels, gotolabels = collectlabels(code)
         code = replacedocontinue(code, dolabels, gotolabels)
+
         code = processconditionalgotos(code)
 
         code = processiostatements(code, formats)
 
-        #write("test.jl", code)
         code, strings = saveallstrings(code)
-        #@show strings
 
         code = processifstatements(code)
 
-        # process multiline replacements
-        for rx in multilinereplacements
-            code = replace(code, rx)
-        end
-
         #write("test.jl", code)
+        # process replacements
+        code = foldl(replace, collect(multilinereplacements), init=code)
+        code = foldl(replace, collect(singlewordreplacements), init=code)
+        #write("test2.jl", code)
+
+        code = processimplieddoloops(code)
+
         code = processselectcase(code)
 
         code = processparameters(code)
 
+        #write("test.jl", code)
         code = processdata(code)
 
-        lines = splitonlines(code)
+        code = splatprintviews(code)
 
-        lines, comments = splitoncomment(lines)
-
-        lines = map(casetransform, lines)
-
-        for rx in singlewordreplacements
-            lines = map(a->replace(a, rx), lines)
-        end
+        lines, comments = splitoncomment(code)
 
         lines = processlinescontinuation(lines)
 
@@ -202,9 +218,9 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         for rx in replacements
             lines = map(a->replace(a, rx), lines)
         end
-        #write("test.jl", foldl((a,b) -> a*'\n'*b, lines))
+        #write("test2.jl", foldl((a,b) -> a*'\n'*b, lines))
 
-        # strip all whitespaces inside brackets due
+        # strip all whitespaces inside brackets due to
         # https://github.com/JuliaLang/julia/issues/14853
         lines = stripwhitesinbrackets(lines)
 
@@ -213,16 +229,18 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         #lines = includeformat(lines, formats)
 
-        # concat string lines back together and
-        # create functions declaration with custom header
+        # concat string lines back together and restore comments
         code = foldl((a,b) -> a*'\n'*b, lines)
-        for rx in headersprocessing
-            code = replace(code, rx)
-        end
+        code = foldl(replace, collect(commentstrings), init=code)
 
         # removing unnecessaries
         for rx in removal
             code = replace(code, rx => "")
+        end
+
+        # create functions declaration with custom header
+        for rx in headersprocessing
+            code = replace(code, rx)
         end
 
         #write("test.jl", code)
@@ -586,7 +604,8 @@ function collectcommon(code)
 end
 
 function iscontinued(line1, line2)
-    if occursin(r"^[^#&]*&\h*(#.*|)$"m, line1) ||  # free-form continuation
+    if occursin(r"^[^#&]*&\h*(#\w+|)$"m, line1) ||  # free-form continuation
+    #if occursin(r"^[^#&]*&\h*(#.*|)$"m, line1) ||  # free-form continuation
        occursin(r"^     [.+&$\w].*$"m, line2)  #=||  # fixed-form startline continuation
        occursin(r"^[#]", line2)                  =#  # commented out line
         return true
@@ -885,7 +904,7 @@ function parsereadwrite(str, position)
                 IU = lex
             else
                 @warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
-                      " in FORTRAN line:\n\"$(strip(thisline(str, position)))\"\n")
+                      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, position)]))\"\n")
             end
         elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
             IU, position = taketoken(str, position)
@@ -1190,17 +1209,53 @@ function skipupto(c, str, i)
     return i
 end
 
-function thisline(str, i)
+function startoflineind(str, i)
     i = thisind(str, i)
-    len = i
-    while len < ncodeunits(str) && str[len] !='\n'
-        len = nextind(str, len)
-    end
-    # look from start of line
+    i < 1 && return 0
     while i>1 && str[prevind(str, i)] !='\n'
         i = prevind(str, i)
     end
-    return str[i:len]
+    return i
+end
+function endoflineind(str, i)
+    i = thisind(str, i)
+    i > ncodeunits(str) && return ncodeunits(str)+1
+    while i < ncodeunits(str) && str[i] !='\n'
+        i = nextind(str, i)
+    end
+    return i
+end
+thislinerange(str, i) = UnitRange(startoflineind(str, i):endoflineind(str, i))
+function nextlinerange(str, i)
+    i = thisind(str, i)
+    firstip1 = nextind(str, endoflineind(str, i))
+    if firstip1 >= ncodeunits(str)
+        return UnitRange(firstip1:ncodeunits(str))
+    else
+        return UnitRange(firstip1:endoflineind(str, firstip1))
+    end
+end
+function prevlinerange(str, i)
+    i = thisind(str, i)
+    lastim1 = prevind(str, startoflineind(str, i))
+    if lastim1 < 1
+        return UnitRange(1:lastim1)
+    else
+        return UnitRange(startoflineind(str, lastim1):lastim1)
+    end
+end
+
+function continuedlinesrange(str, i)
+    i = thisind(str, i)
+    firsti = startoflineind(str, i)
+    while iscontinued(str[prevlinerange(str, firsti)], str[thislinerange(str, firsti)])
+        firsti = startoflineind(str, prevind(str, firsti))
+    end
+    lasti = endoflineind(str, i)
+    while iscontinued(str[thislinerange(str, lasti)], str[nextlinerange(str, lasti)])
+        lasti = endoflineind(str, nextind(str, lasti))
+    end
+    return UnitRange(firsti, lasti)
 end
 
 function collectlabels(code)
@@ -1211,7 +1266,8 @@ function collectlabels(code)
     # capture 'DO's and 'GOTO's labels
     dolabels = Set{String}()
     gotolabels = Set{String}()
-    rx = r"^\h*(?:do|for)\h+(\d+)\h+"i
+    rx = r"^(?:\h*\d+:?\h*|\h*)(?:do|for)\h*(\d+)(?:\h*,|)\h*\w+\h*="i
+    #rx = r"^\h*(?:do|for)\h+(\d+)\h+"i
     for i in axes(lines,1)
         (m = match(rx, lines[i])) != nothing && push!(dolabels, m.captures[1])
     end
@@ -1367,6 +1423,19 @@ function replacearraysbrackets(code, arrays)
     return code
 end
 
+function savecomments(code)
+    lines, comments = splitoncomment(code)
+    commentstrings = OrderedDict{String,String}()
+    for (i, str) = enumerate(comments)
+        if ncodeunits(strip(str)) > 0
+            key = @sprintf "#%diZjAcpPokM" i
+            commentstrings[key] = str
+            lines[i] *= key
+        end
+    end
+    return isa(code, AbstractVector) ? lines : foldl((a,b) -> a*'\n'*b, lines), commentstrings
+end
+
 """
 replace the saved all strings with its keys
 """
@@ -1436,6 +1505,102 @@ function stripwhitesinbrackets(lines)
         #code = code[1:o-1] * replace(m.match, " " => "") * code[o+length(m.match):end]
     end
     return lines isa AbstractVector ? split(code, '\n') : code
+end
+
+function processimplieddoloops(code)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
+    # `A = [(real(I), I=3, 5)]` => `A = [real(I) for I=3, 5]`
+    # not released: `/(real(I), I=3, 5)/` => `[real(I) for I=3, 5]`
+    # `(WRITE(*,*)(A(I), I=3, 5)` => `print(view(A, 3:5)...)`
+    # `(READ(*,*)(A(I), I=3, 5)` => `READ(view(A, 3:5))`
+    # `DATA (A(I), I=3, 5)` => `DATA view(A, 3:5)`
+
+    # https://pages.mtu.edu/~shene/COURSES/cs201/NOTES/chap08/io.html<Paste>
+    # ( item-1, item-2, ...., item-n, DO-var = initial, final, step )
+    # https://regex101.com/r/RW27vC/2
+    rxbr = r"(\(((?>[^()]++|(?1))*)\))"
+    rxsqbr = r"\[\h*(\(((?>[^()]++|(?1))*)\))\h*\]"
+    rxslbr = r"\/\h*(\(((?>[^()]++|(?1))*)\))\h*\/"
+
+    for m in reverse(collect(eachmatch(rxsqbr, code1)))
+        str = m.captures[2]
+        if occursin('=', str)
+            str = processimplieddoloops(str)
+            ex = nothing
+            try ex = Meta.parse('('*str*')') catch end
+            #(ex == nothing || ex.head == :incomplete) && continue
+            if (p = matchex(:(_E, _I = _1, _2, _INC), ex)) != nothing
+                iex, var, r1, r2, inc = p[:_E], p[:_I], p[:_1], p[:_2], p[:_INC]
+                code1 = replace(code1, m.match => "[$iex for $var = $r1:$inc:$r2]")
+            elseif (p = matchex(:(_E, _I = _1, _2), ex)) != nothing
+                iex, var, r1, r2 = p[:_E], p[:_I], p[:_1], p[:_2]
+                code1 = replace(code1, m.match => "[$iex for $var = $r1:$r2]")
+            else
+                code1 = replace(code1, m.match => "[("*str*")]")
+            end
+        end
+    end
+
+    for m in reverse(collect(eachmatch(rxbr, code1)))
+        str = m.captures[2]
+        if occursin('=', str)
+            str = processimplieddoloops(str)
+            ex = nothing
+            try ex = Meta.parse('('*str*')') catch end
+            #@show str, ex
+            if (p = matchex(:(_NAME(_E), _I = _1, _2, _INC), ex)) != nothing ||
+               (p = matchex(:(_NAME[_E], _I = _1, _2, _INC), ex)) != nothing
+                nam, iex, var, r1, r2, inc = p[:_NAME], p[:_E], p[:_I], p[:_1], p[:_INC], p[:_2]
+                r1, r2 = map(r -> rewrite_all(iex, [var => r]), (r1, r2))
+                str = "view($nam, $r1:$inc:$r2)"
+            elseif (p = matchex(:(_NAME(_E1,_E2), _I = _1, _2, _INC), ex)) != nothing ||
+                   (p = matchex(:(_NAME[_E1,_E2], _I = _1, _2, _INC), ex)) != nothing
+                nam, iex1, iex2, var, r1, r2, inc =
+                    p[:_NAME], p[:_E1], p[:_E2], p[:_I], p[:_1], p[:_INC], p[:_2]
+                if matchingex(var, iex1)
+                    r1, r2 = map(r -> rewrite_all(iex1, [var => r]), (r1, r2))
+                    str = "view($nam, $r1:$inc:$r2, $iex2)"
+                else
+                    r1, r2 = map(r -> rewrite_all(iex2, [var => r]), (r1, r2))
+                    str = "view($nam, $iex1, $r1:$inc:$r2)"
+                end
+            elseif (p = matchex(:(_NAME(_E), _I = _1, _2), ex)) != nothing ||
+                   (p = matchex(:(_NAME[_E], _I = _1, _2), ex)) != nothing
+                nam, iex, var, r1, r2 = p[:_NAME], p[:_E], p[:_I], p[:_1], p[:_2]
+                r1, r2 = map(r -> rewrite_all(iex, [var => r]), (r1, r2))
+                str = "view($nam, $r1:$r2)"
+            elseif (p = matchex(:(_NAME(_E1,_E2), _I = _1, _2), ex)) != nothing ||
+                   (p = matchex(:(_NAME[_E1,_E2], _I = _1, _2), ex)) != nothing
+                nam, iex1, iex2, var, r1, r2 = p[:_NAME], p[:_E1], p[:_E2], p[:_I], p[:_1], p[:_2]
+                if matchingex(var, iex1)
+                    r1, r2 = map(r -> rewrite_all(iex1, [var => r]), (r1, r2))
+                    str = "view($nam, $r1:$r2, $iex2)"
+                else
+                    r1, r2 = map(r -> rewrite_all(iex2, [var => r]), (r1, r2))
+                    str = "view($nam, $iex1, $r1:$r2)"
+                end
+            else
+                str = '(' * str * ')'
+            end
+            code1 = replace(code1, m.match => str)
+        end
+    end
+
+    return code isa AbstractVector ? split(code1, '\n') : code1
+end
+
+function splatprintviews(code)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
+    rx = r"view(\(((?>[^()]++|(?1))*)\))"
+    for m in reverse(collect(eachmatch(rx, code1)))
+        line = code1[continuedlinesrange(code1, m.offset)]
+        if occursin(r"\bprintln\b|\bat_iZjAcpPokMprintf\b", line)
+            o = m.offset
+            l = ncodeunits(m.match)
+            code1 = code1[1:prevind(code1,o)] * m.match * "..." * code1[thisind(code1,o+l):end]
+        end
+    end
+    return code isa AbstractVector ? split(code1, '\n') : code1
 end
 
 function collectformat(code)
@@ -1753,19 +1918,25 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
     # https://regex101.com/r/J5ViSG/1
     r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n\n     \\3\\4"),
-    # array repeating statement https://regex101.com/r/R9g9aU/7 for READ/WRITE and DATA
-    # complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
-    #r"\(\h*([\w]+)\([\h\w+/*-]*([^()]+)[\h\w+/*-]*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    #r"\(\h*([\w]+)\[[\h\w+/*-]*([^\[\]]+)[\h\w+/*-]*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    r"\(\h*([\w]+)\(\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
-    r"\(\h*([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
-    r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
-    r"\(\h*([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
-    r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
+    #### array repeating statement https://regex101.com/r/R9g9aU/7 for READ/WRITE and DATA
+    #### complex expressions like "(A(I)=1,SIZE(A,1))" are ommited
+    ####r"\(\h*([\w]+)\([\h\w+/*-]*([^()]+)[\h\w+/*-]*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    ####r"\(\h*([\w]+)\[[\h\w+/*-]*([^\[\]]+)[\h\w+/*-]*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    ###r"\(\h*([\w]+)\(\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    ###r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\4:\\5)"),
+    ###r"\(\h*([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    ###r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\2)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\5:\\6, \\3)"),
+    ###r"\(\h*([\w]+)\(\h*([^()]+)\h*,\h*([^()]+)\h*\),\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
+    ###r"\(\h*([\w]+)\[\h*([^\[\]]+)\h*,\h*([^\[\]]+)\h*\],\h*(\3)\h*\=\h*([^()]+)\h*,\h*(.*?)\h*\)"mi => @s_str("view(\\1, \\2, \\5:\\6)"),
 )
 
 const singlewordreplacements = OrderedDict(
+    #r"(\bif\b|\belseif\b|\bend\b|\bdo\b|\bwhile\b)"i => s"\L\1",
+    r"(\bif\b)"i     => s"if",
+    r"(\belseif\b)"i => s"elseif",
+    r"(\bend\b)"i    => s"end",
+    r"(\bdo\b)"i     => s"do",
+    r"(\bwhile\b)"i  => s"while",
     # Use greek symbols, is it need?
     r"\balpha([_\d]*)\b"i   => s"α\1",
     r"\bbeta([_\d]*)\b"i    => s"β\1",
@@ -1777,36 +1948,36 @@ const singlewordreplacements = OrderedDict(
     # Swap logical symbols
     r"\.true\."i => "true",
     r"\.false\."i => "false",
-    r"(\s+)\.or\.(\s+)"i => s"\1||\2",
-    r"(\s+)\.and\.(\s+)"i => s"\1&&\2",
-    r"(\s+)\.not\.(\s+)"i => s"\1!",
-    r"(\s+)\.eq\.(\s+)"i => s"\1==\2",
-    r"(\s+)\.ne\.(\s+)"i => s"\1!=\2",
-    r"(\s+)\/=(\s+)"i    => s"\1!=\2",
-    r"(\s+)\.le\.(\s+)"i => s"\1<=\2",
-    r"(\s+)\.ge\.(\s+)"i => s"\1>=\2",
-    r"(\s+)\.gt\.(\s+)"i => s"\1>\2",
-    r"(\s+)\.lt\.(\s+)"i => s"\1<\2",
-    r"(\s+)\.or\.\s*"i => s"\1|| ",
-    r"(\s+)\.and\.\s*"i => s"\1&& ",
-    r"(\s+)\.not\.\s*"i => s"\1!",
-    r"(\s+)\.eq\.\s*"i => s"\1== ",
-    r"(\s+)\.ne\.\s*"i => s"\1!= ",
-    r"(\s+)\/=\s*"i    => s"\1!= ",
-    r"(\s+)\.le\.\s*"i => s"\1<= ",
-    r"(\s+)\.ge\.\s*"i => s"\1>= ",
-    r"(\s+)\.gt\.\s*"i => s"\1> ",
-    r"(\s+)\.lt\.\s*"i => s"\1< ",
-    r"\s*\.or\.\s*"i => s" || ",
-    r"\s*\.and\.\s*"i => s" && ",
-    r"\s*\.not\.\s*"i => s" !",
-    r"\s*\.eq\.\s*"i => s" == ",
-    r"\s*\.ne\.\s*"i => s" != ",
-    r"\s*\/=\s*"i    => s" != ",
-    r"\s*\.le\.\s*"i => s" <= ",
-    r"\s*\.ge\.\s*"i => s" >= ",
-    r"\s*\.gt\.\s*"i => s" > ",
-    r"\s*\.lt\.\s*"i => s" < ",
+    r"(\h+)\.or\.(\h+)"i => s"\1||\2",
+    r"(\h+)\.and\.(\h+)"i => s"\1&&\2",
+    r"(\h+)\.not\.(\h+)"i => s"\1!",
+    r"(\h+)\.eq\.(\h+)"i => s"\1==\2",
+    r"(\h+)\.ne\.(\h+)"i => s"\1!=\2",
+    r"(\h+)\/=(\h+)"i    => s"\1!=\2",
+    r"(\h+)\.le\.(\h+)"i => s"\1<=\2",
+    r"(\h+)\.ge\.(\h+)"i => s"\1>=\2",
+    r"(\h+)\.gt\.(\h+)"i => s"\1>\2",
+    r"(\h+)\.lt\.(\h+)"i => s"\1<\2",
+    r"(\h+)\.or\.\h*"i => s"\1|| ",
+    r"(\h+)\.and\.\h*"i => s"\1&& ",
+    r"(\h+)\.not\.\h*"i => s"\1!",
+    r"(\h+)\.eq\.\h*"i => s"\1== ",
+    r"(\h+)\.ne\.\h*"i => s"\1!= ",
+    r"(\h+)\/=\h*"i    => s"\1!= ",
+    r"(\h+)\.le\.\h*"i => s"\1<= ",
+    r"(\h+)\.ge\.\h*"i => s"\1>= ",
+    r"(\h+)\.gt\.\h*"i => s"\1> ",
+    r"(\h+)\.lt\.\h*"i => s"\1< ",
+    r"\h*\.or\.\h*"i => s" || ",
+    r"\h*\.and\.\h*"i => s" && ",
+    r"\h*\.not\.\h*"i => s" !",
+    r"\h*\.eq\.\h*"i => s" == ",
+    r"\h*\.ne\.\h*"i => s" != ",
+    r"\h*\/=\h*"i    => s" != ",
+    r"\h*\.le\.\h*"i => s" <= ",
+    r"\h*\.ge\.\h*"i => s" >= ",
+    r"\h*\.gt\.\h*"i => s" > ",
+    r"\h*\.lt\.\h*"i => s" < ",
     # Some specific functions
     # https://gcc.gnu.org/onlinedocs/gcc-9.2.0/gfortran/Intrinsic-Procedures.html
     # https://docs.oracle.com/cd/E19957-01/805-4939/6j4m0vnc8/index.html
@@ -1909,7 +2080,7 @@ const replacements = OrderedDict(
     r"(?<=[^\s=<>!/\\])=(?=[^\s=])" => " = ",
     #r"(?<=[^\s=])=(?=[^\s=])" => " = ",
     # splatting view() in print: https://regex101.com/r/SPfeco/3
-    r"((?:\bat_iZjAcpPokMprintf\b|\bprintln\b).*?(?:\bview\b\h*))(\(((?>[^()]++|(?2))*)\))" => s"\1\2...",
+    #r"((?:\bat_iZjAcpPokMprintf\b|\bprintln\b).*?(?:\bview\b\h*))(\(((?>[^()]++|(?2))*)\))" => s"\1\2...",
     # Remove expression's brackets after if/elseif/while https://regex101.com/r/eF9bK5/17
     r"^(\h*)(if|elseif|while)(\h*)(\(((?>[^()]++|(?4))*)\))\h*$"m => s"\1\2\3\5",
     # Process PARAMETER
