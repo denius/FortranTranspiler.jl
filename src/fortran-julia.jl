@@ -84,6 +84,7 @@ function printusage()
         --returnnothing
         --packarrays
         --strings
+        --single           Evaluate 1.0E0 as Float32. Double precision in fortran is 1.0D0
 ")
 end
 
@@ -446,23 +447,23 @@ function commentoutdeclarations(code)
         r"^\h*common\h*\/\h*\w+\h*\/\h*"mi,
         r"^\h*dimension\h+"mi,
         r"^\h*implicit\h*\w+"mi,
-        r"^\h*real.*::"mi,
+        r"^\h*real(?!.*parameter).*::"mi, # https://regex101.com/r/7YxbnB/1
         r"^\h*real\h*$"mi,
         r"^\h*real\h+(?!.*function)"mi, # https://regex101.com/r/CFiiOx/1
         r"^\h*real\*[0-9]+\h+(?!.*function)"mi,
-        r"^\h*double\h*precision.*::"mi,
+        r"^\h*double\h*precision(?!.*parameter).*::"mi,
         r"^\h*double\h*precision\h*$"mi,
         r"^\h*double\h*precision\h+(?!.*function)"mi,
-        r"^\h*complex.*::"mi,
+        r"^\h*complex(?!.*parameter).*::"mi,
         r"^\h*complex\h*$"mi,
         r"^\h*complex\h+(?!.*function)"mi,
         r"^\h*complex\*[0-9]+\h+(?!.*function)"mi,
-        r"^\h*integer.*::"mi,
+        r"^\h*integer(?!.*parameter).*::"mi,
         r"^\h*integer\h*$"mi,
         r"^\h*integer\h+(?!.*function)"mi,
         r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*integer\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
-        r"^\h*character.*::"mi,
+        r"^\h*character(?!.*parameter).*::"mi,
         r"^\h*character\h*$"mi,
         r"^\h*character\h+(?!.*function)"mi,
         r"^\h*character\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
@@ -472,7 +473,7 @@ function commentoutdeclarations(code)
         r"^\h*character\*\h*\([\h\w_*+-]+\)\h*(?!.*function)"mi,
         r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*external\h+"mi,
-        r"^\h*logical.*::"mi,
+        r"^\h*logical(?!.*parameter).*::"mi,
         r"^\h*logical\h*$"mi,
         r"^\h*logical\h+(?!.*function)"mi,
         r"^\h*allocatable\h+"mi,
@@ -1847,25 +1848,86 @@ function processselectcase(code)
 end
 
 function processparameters(code)
-    patterns = [
-        r"^\h*parameter\h*\("mi
-    ]
-    marked = markbypattern(patterns, code)
-    lines, comments = splitoncomment(code)
-    for i in marked
-        lines[i] = replace(lines[i], patterns[1] => s"      ")
-        lines[i] = replace(lines[i], r"," => s";")
-        lines[i] = replace(lines[i], r"\)$" => s"")
-        lines[i] = replace(lines[i], r"^     [.+&$]" => "      ")
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
+    rx = r"^\h*parameter\h*\("mi
+    for m in reverse(collect(eachmatch(rx, code1)))
+        r = continuedlinesrange(code1, m.offset)
+        line = code1[r]
+        str = lex = ""
+        statementtaken = false
+        inbraces = 0; p = 1
+        while true
+            ttype = picktoken(line, p)
+            if ttype == 'e'
+                str *= '\n'
+                break
+            elseif inbraces == 0 && ttype == '('
+                inbraces += 1
+                p = nextind(line, p)
+                str *= ' '
+            elseif ttype == '('
+                p1 = p; p = skipbraces(line, p)
+                str *= "Complex" * line[p1:prevind(line, p)]
+            elseif inbraces == 1 && ttype == ')'
+                inbraces -= 1
+                p = nextind(line, p)
+                str *= ' ' * line[p:end]
+                break
+            elseif !statementtaken && ttype == 'l'
+                lex, p = taketoken(line, p)
+                @assert uppercase(lex) == "PARAMETER"
+                str *= ' '^length(lex)
+                statementtaken = true
+            elseif ttype == ','
+                p = skiptoken(line, p)
+                str *= ';'
+            else
+                p1 = p; p = skiptoken(line, p)
+                str *= line[p1:prevind(line, p)]
+            end
+        end
+        code1 = code1[1:prevind(code1,r[1])] * str * code1[nextind(code1,r[end]):end]
     end
 
-    # TODO: F90 with :: declarations
-    patterns = [
-        r"\h*[^,#]+\h*,\h*parameter\h*::\h*"mi
-    ]
+    rx = r"\bparameter\b[^\n#]*::"mi
+    for m in reverse(collect(eachmatch(rx, code1)))
+        r = continuedlinesrange(code1, m.offset)
+        line = code1[r]
+        str = ""
+        statementtaken = false
+        inbraces = 0; p = 1
+        while true
+            ttype = picktoken(line, p)
+            if ttype == 'e'
+                str *= '\n'
+                break
+            elseif !statementtaken && ttype == ':' && picknexttoken(line, p) == ':'
+                p = nextind(line, nextind(line, p))
+                str *= "      "
+                statementtaken = true
+            elseif !statementtaken
+                p1 = p; p = skiptoken(line, p)
+                #str *= ' '^(p-p1)
+            elseif ttype == '(' || ttype == '['
+                inbraces += 1
+                p = nextind(line, p)
+                str *= ttype
+            elseif ttype == ')' || ttype == ']'
+                inbraces -= 1
+                p = nextind(line, p)
+                str *= ttype
+            elseif inbraces == 0 && ttype == ','
+                p = nextind(line, p)
+                str *= ';'
+            else
+                p1 = p; p = skiptoken(line, p)
+                str *= line[p1:prevind(line, p)]
+            end
+        end
+        code1 = code1[1:prevind(code1,r[1])] * str * code1[nextind(code1,r[end]):end]
+    end
 
-    lines = map(*, lines, comments)
-    return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
+    return code isa AbstractVector ? split(code1, '\n') : code1
 end
 
 function processdatastatement(code, arrays)
@@ -1875,7 +1937,7 @@ function processdatastatement(code, arrays)
         r = continuedlinesrange(code1, m.offset)
         line = code1[r]
         str = lex = ""
-        p = 1; datataken = itscal = itvector = afterlist = false
+        p = 1; statementtaken = itscal = itvector = afterlist = false
         while true
             ttype = picktoken(line, p)
             if ttype == 'e'
@@ -1888,11 +1950,11 @@ function processdatastatement(code, arrays)
             elseif ttype == '('
                 p1 = p; p = skipbraces(line, p)
                 str *= line[p1:prevind(line, p)]
-            elseif !datataken && ttype == 'l'
+            elseif !statementtaken && ttype == 'l'
                 lex, p = taketoken(line, p)
                 @assert uppercase(lex) == "DATA"
                 str *= ' '^length(lex)
-                datataken = true
+                statementtaken = true
             elseif ttype == 'l'
                 p1 = p; lex, p = taketoken(line, p)
                 str *= line[p1:prevind(line, p)]
@@ -2141,9 +2203,6 @@ const replacements = OrderedDict(
     #r"((?:\bat_iZjAcpPokMprintf\b|\bprintln\b).*?(?:\bview\b\h*))(\(((?>[^()]++|(?2))*)\))" => s"\1\2...",
     # Remove expression's brackets after if/elseif/while https://regex101.com/r/eF9bK5/17
     r"^(\h*)(if|elseif|while)(\h*)(\(((?>[^()]++|(?4))*)\))\h*$"m => s"\1\2\3\5",
-    # Process PARAMETER
-    r"^(\h*)parameter(\h+)\((.*)\)(\h*?#.*|\h*?)$"mi => s"\1\2\3\4",
-    r"^(\h*).*;\h*parameter\h*::\h*(.*)(\h*?#.*|\h*?)$"mi => s"\1\2\3",
     # breaks
     r"\bexit\b"mi => s"break",
     #r"\breturn\b"mi => s"return",
