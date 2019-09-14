@@ -38,7 +38,6 @@ using DataStructures, Printf, Espresso, JuliaFormatter
     * some unserviceable comments are cutted off (eg. in expanded lines continuations).
     * this script is mostly for the fixed-form fortran and in the free-form is not tested yet.
     * in the `DATA` statement can occur uncatched repetitions like `DATA SOMEARRAY/8*0,1,2/`
-    * `READ`/`WRITE` is ugly
     * `@printf` can't use dynamic (changed at runtime) FORMAT string
     * 'FORMAT' conversion is unaccomplished
     * implied do-loops not always catched
@@ -158,6 +157,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     for i = 1:length(subs)-1
 
         code = foldl((a,b) -> a*'\n'*b, view(alllines, subs[i]:subs[i+1]-1))
+        veryverbose && println()
         verbose && print("[$(subs[i]):$(subs[i+1]-1)] $(strip(subnames[i]))\n")
 
         scalars, arrays = collectvars(code)
@@ -171,7 +171,6 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         veryverbose && length(commons) > 0 && println("    COMMONs : $commons")
 
         code, formats = collectformat(code)
-        veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
 
         # comment out all vars declarations
         code = commentoutdeclarations(code)
@@ -187,9 +186,8 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code = processconditionalgotos(code)
 
-        write("test.jl", code)
-        code = processiostatements(code, formats)
-        write("test2.jl", code)
+        code, formats = processiostatements(code, formats)
+        veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
 
         code, strings = saveallstrings(code)
 
@@ -208,7 +206,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = processparameters(code)
 
         #write("test.jl", code)
-        code = processdata(code, vcat(arrays,"view"))
+        code = processdatastatement(code, vcat(arrays,"view"))
 
         code = splatprintviews(code)
 
@@ -247,7 +245,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         #write("test.jl", code)
         # restore saved tokens
-        code = foldl(replace, collect(strings), init=code)
+        code = foldl(replace, reverse(collect(strings)), init=code)
         code = restorespecialsymbols(code)
 
         try
@@ -656,36 +654,36 @@ function parsedostatement(line)
     reflabel   = ""
     label      = ""
     countervar = ""
-    position   = 1
+    pstn   = 1
     inbraces   = 0
     nextarg    = 0
     starts     = [0,0,0]
 
     while true
-        ttype = picktoken(line, position)
+        ttype = picktoken(line, pstn)
         #print("_$ttype")
         if ttype == 'e' || ttype == '#'
             break
         elseif ttype == ' '
-            position = skipspaces(line, position)
+            pstn = skipspaces(line, pstn)
         #elseif ttype == '#'
-        #    break #position = skipspaces(line, position)
+        #    break #pstn = skipspaces(line, pstn)
         elseif nextarg == 0 && ttype == 'd'
-            reflabel, position = taketoken(line, position)
+            reflabel, pstn = taketoken(line, pstn)
         elseif nextarg == 0 && ttype == 'l'
-            lex, position = taketoken(line, skipspaces(line, position))
+            lex, pstn = taketoken(line, skipspaces(line, pstn))
             if lowercase(lex) == "do"
-                lex, position = taketoken(line, skipspaces(line, position))
+                lex, pstn = taketoken(line, skipspaces(line, pstn))
                 if isdigit(lex[1]) # LABEL
                     label = lex
-                    position = skiptoken(',', line, skipspaces(line, position))
-                    lex, position = taketoken(line, skipspaces(line, position))
+                    pstn = skiptoken(',', line, skipspaces(line, pstn))
+                    lex, pstn = taketoken(line, skipspaces(line, pstn))
                 end
                 countervar = lex
             elseif occursin(r"^do\d+$"i, lex)
                 label = replace(lex, r"^do(\d+)$"i=>s"\1")
-                position = skiptoken(',', line, skipspaces(line, position))
-                countervar, position = taketoken(line, skipspaces(line, position))
+                pstn = skiptoken(',', line, skipspaces(line, pstn))
+                countervar, pstn = taketoken(line, skipspaces(line, pstn))
             elseif occursin(r"^do\d+[a-z].*$"i, lex)
                 label = replace(lex, r"^do(\d+)([a-zA-Z].*)$"i=>s"\1")
                 countervar = replace(lex, r"^do(\d+)([a-zA-Z].*)$"i=>s"\2")
@@ -694,41 +692,41 @@ function parsedostatement(line)
             else # something goes wrong
                 return false,"","","","","","",""
             end
-            position = skipspaces(line, position)
-            if picktoken(line, position) != '='
+            pstn = skipspaces(line, pstn)
+            if picktoken(line, pstn) != '='
                 # it is not the 'DO' statement
                 return false,"","","","","","",""
             end
-            position = skiptoken(line, position)
-            starts[nextarg+=1] = position
+            pstn = skiptoken(line, pstn)
+            starts[nextarg+=1] = pstn
         elseif ttype == '('
             inbraces += 1
-            position = skiptoken(line, position)
+            pstn = skiptoken(line, pstn)
         elseif ttype == ')'
             inbraces -= 1
-            position = skiptoken(line, position)
+            pstn = skiptoken(line, pstn)
         elseif ttype == ','
-            position = skiptoken(line, position)
+            pstn = skiptoken(line, pstn)
             if inbraces == 0
-                starts[nextarg+=1] = position
+                starts[nextarg+=1] = pstn
             end
         else
-            position = skiptoken(line, position)
+            pstn = skiptoken(line, pstn)
         end
     end
 
     if starts[1] == 0 || starts[2] == 0
         return false,"","","","","","",""
     elseif starts[3] == 0
-        starts[3] = position + 1
+        starts[3] = pstn + 1
     end
 
     # cross our fingers to have simple ascii without multibyte characters
     return true, reflabel, label, countervar,
            strip(line[starts[1]:starts[2]-2]),
            strip(line[starts[2]:starts[3]-2]),
-           strip(line[starts[3]:position-1]),
-           line[position:end]                   # trailing comment
+           strip(line[starts[3]:pstn-1]),
+           line[pstn:end]                   # trailing comment
 end
 
 function processifstatements(code)
@@ -765,8 +763,8 @@ function processifstatements(code)
     return code isa AbstractVector ? split(code1, '\n') : code1
 end
 
-function parseifstatement(str, position)
-    position0 = position
+function parseifstatement(str, pstn)
+    pstn0 = pstn
     reflabel = ""
     afterthencomment = ""
     iftaken = false
@@ -776,18 +774,18 @@ function parseifstatement(str, position)
     inbraces  = 0
 
     while true
-        ttype = picktoken(str, position)
+        ttype = picktoken(str, pstn)
         #print("_$ttype")
         if ttype == 'e' || ttype == '\n'
             break
         elseif ttype == ' '
-            position = skipspaces(str, position)
+            pstn = skipspaces(str, pstn)
         elseif !iftaken && ttype == 'd'
-            reflabel, position = taketoken(str, position)
+            reflabel, pstn = taketoken(str, pstn)
         elseif !iftaken && ttype == 'l'
-            lex, position = taketoken(str, position)
+            lex, pstn = taketoken(str, pstn)
             if lowercase(lex) == "else"
-                lex, position = taketoken(str, skipspaces(str, position))
+                lex, pstn = taketoken(str, skipspaces(str, pstn))
             end
             if lowercase(lex) == "if" || lowercase(lex) == "elseif"
                 iftaken = true
@@ -796,38 +794,38 @@ function parseifstatement(str, position)
                 return 0, wothen, "", "", ""
             end
         elseif iftaken && inbraces == 0 && ttype == 'l'
-            lex, position = taketoken(str, position)
+            lex, pstn = taketoken(str, pstn)
             if lowercase(lex) == "then"
                 wothen = false
-                if picktoken(str, skipwhitespaces(str, position)) == '#'
-                    afterthencomment = str[position:prevind(str, (position = skipcomment(str, skipwhitespaces(str,position)))...)]
+                if picktoken(str, skipwhitespaces(str, pstn)) == '#'
+                    afterthencomment = str[pstn:prevind(str, (pstn = skipcomment(str, skipwhitespaces(str,pstn)))...)]
                 else
-                    position = skipwhitespaces(str, position)
-                    #position = skipspaces(str, position)
+                    pstn = skipwhitespaces(str, pstn)
+                    #pstn = skipspaces(str, pstn)
                 end
                 break
             else
                 wothen = true
-                endexec = position = skipupto('\n', str, position)
+                endexec = pstn = skipupto('\n', str, pstn)
                 endexec = prevind(str, endexec)
             end
         elseif ttype == '('
             inbraces += 1
-            position = skiptoken(str, position)
-            startcond == 0 && (startcond = position)
+            pstn = skiptoken(str, pstn)
+            startcond == 0 && (startcond = pstn)
         elseif ttype == ')'
             inbraces -= 1
             if inbraces == 0 && endcond == -1
-                endcond = prevind(str, position)
-                startexec = nextind(str, position)
+                endcond = prevind(str, pstn)
+                startexec = nextind(str, pstn)
             end
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
         else
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
         end
     end
 
-    return ncodeunits(str[position0:prevind(str,position)]), wothen,
+    return ncodeunits(str[pstn0:prevind(str,pstn)]), wothen,
            str[startcond:endcond], str[startexec:endexec], afterthencomment
 end
 
@@ -839,9 +837,12 @@ function processiostatements(code, formats)
         o = m.offset
         readwrite = lowercase(replace(m.match, rxhead => s"\1"))
         iolength, io, label, fmt, pmt, paramsstr, args = parsereadwrite(code1, o)
-        #@show iolength, io, label, fmt, pmt, paramsstr, args
-        length(label) > 0 && haskey(formats, label) && (fmt = formats[label])
-        #length(fmt) > 0 && @show fmt
+        @show iolength, io, label, fmt, pmt, paramsstr, args
+        if length(label) > 0 && haskey(formats, label)
+            fmt = formats[label]
+        else
+            formats["FMT$(m.offset)"] = fmt
+        end
         fmt = convertformat(fmt)
         if  readwrite == "read" && (io == "5" || io == "*")
             io = "stdin"
@@ -860,11 +861,11 @@ function processiostatements(code, formats)
         str *= io * ", " * fmt * args
         code1 = code1[1:prevind(code1,o)] * str * code1[thisind(code1,o+iolength):end]
     end
-    return code isa AbstractVector ? split(code1, '\n') : code1
+    return code isa AbstractVector ? split(code1, '\n') : code1, formats
 end
 
-function parsereadwrite(str, position)
-    position0 = position
+function parsereadwrite(str, pstn)
+    pstn0 = pstn
     label = ""
     fmt = ""
     IU = ""
@@ -879,68 +880,69 @@ function parsereadwrite(str, position)
     inbraces  = 0
 
     while true
-        ttype = picktoken(str, position)
+        ttype = picktoken(str, pstn)
         #print("_$ttype")
         if ttype == 'e' || ttype == '\n'
             break
         elseif ttype == ' '
-            position = skipspaces(str, position)
+            pstn = skipspaces(str, pstn)
         elseif !cmdtaken && ttype == 'l'
-            lex, position = taketoken(str, position)
+            lex, pstn = taketoken(str, pstn)
             if lowercase(lex) == "read" || lowercase(lex) == "write"
                 cmdtaken = true
-                position = skipspaces(str, position)
+                pstn = skipspaces(str, pstn)
             else
                 # that is not an 'READ/WRITE' statement
                 return 0, "", "", "", "", "", "", ""
             end
         elseif cmdtaken && inparams && ttype == 'l'
-            lex, position = taketoken(str, position)
+            lex, pstn = taketoken(str, pstn)
             LEX = uppercase(lex)
-            if LEX == "FMT" && picktoken(str, skipspaces(str, position)) == '='
-                label, position = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, position))))
-            elseif (LEX == "ERR" || LEX == "END") && picktoken(str, skipspaces(str, position)) == '='
-                val, position = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, position))))
+            if LEX == "FMT" && picktoken(str, skipspaces(str, pstn)) == '='
+                label, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
+            elseif (LEX == "ERR" || LEX == "END") && picktoken(str, skipspaces(str, pstn)) == '='
+                val, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
                 params[uppercase(lex)] = val
             elseif nextparam == 1
                 IU = lex
             else
                 @warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
-                      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, position)]))\"\n")
+                      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, pstn)]))\"\n")
             end
         elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
-            IU, position = taketoken(str, position)
+            IU, pstn = taketoken(str, pstn)
         elseif cmdtaken && inparams && ttype == 'd'
-            label, position = taketoken(str, position)
+            label, pstn = taketoken(str, pstn)
         elseif cmdtaken && inparams && ttype == '*' && nextparam == 1
-            IU, position = taketoken(str, position)
+            IU, pstn = taketoken(str, pstn)
         elseif cmdtaken && inparams && ttype == ''' || ttype == '*'
-            fmt, position = taketoken(str, position)
+            fmt, pstn = taketoken(str, pstn)
+            fmt = concatlinecontinuation(fmt)
         elseif ttype == '('
             inbraces += 1
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
             if length(startsparam) == 0
-                push!(startsparam, position)
+                push!(startsparam, pstn)
                 inparams = true
             end
         elseif ttype == ')'
             inbraces -= 1
             if inbraces == 0 && inparams
-                push!(endsparam, prevind(str, position))
-                startargs = nextind(str, position)
+                push!(endsparam, prevind(str, pstn))
+                startargs = nextind(str, pstn)
                 inparams = false
-                endargs = position = skipupto('\n', str, position)
+                endargs = pstn = skipupto('\n', str, pstn)
                 endargs = prevind(str, endargs)
                 break
             end
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
         elseif ttype == ',' && inparams && inbraces == 1
-            push!(endsparam, prevind(str, position))
-            position = skiptoken(str, position)
-            push!(startsparam, thisind(str, position))
+            push!(endsparam, prevind(str, pstn))
+            pstn = skiptoken(str, pstn)
+            push!(startsparam, thisind(str, pstn))
             nextparam += 1
         else
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
         end
     end
 
@@ -953,43 +955,43 @@ function parsereadwrite(str, position)
     end
     fmt = foldl((a,b) -> a*','*b, map(strip, split(fmt, ",")))
 
-    return ncodeunits(str[position0:prevind(str,position)]), IU, label, fmt, params,
+    return ncodeunits(str[pstn0:prevind(str,pstn)]), IU, label, fmt, params,
            str[startsparam[1]:endsparam[end]], str[startargs:endargs]
 end
 
 function splitformat(str)
-    position = 1
+    pstn = 1
     lexemstarts = Int[1]
     lexemends = Int[]
     inbraces  = 0
 
     while true
-        ttype = picktoken(str, position)
+        ttype = picktoken(str, pstn)
         #print("_$ttype")
         if ttype == 'e' || ttype == '\n'
             break
         elseif ttype == ' '
-            position = skipwhitespaces(str, position)
+            pstn = skipwhitespaces(str, pstn)
         elseif ttype == ',' && inbraces == 0
-            push!(lexemends, prevind(str, position))
-            position = skiptoken(str, position)
-            push!(lexemstarts, thisind(str, position))
+            push!(lexemends, prevind(str, pstn))
+            pstn = skiptoken(str, pstn)
+            push!(lexemstarts, thisind(str, pstn))
         elseif ttype == '/' && inbraces == 0
-            if position > lexemstarts[end]
-                push!(lexemends, prevind(str, position))
-                push!(lexemstarts, thisind(str, position))
+            if pstn > lexemstarts[end]
+                push!(lexemends, prevind(str, pstn))
+                push!(lexemstarts, thisind(str, pstn))
             end
-            push!(lexemends, thisind(str, position))
-            position = skiptoken(str, position)
-            push!(lexemstarts, thisind(str, position))
+            push!(lexemends, thisind(str, pstn))
+            pstn = skiptoken(str, pstn)
+            push!(lexemstarts, thisind(str, pstn))
         elseif ttype == '('
             inbraces += 1
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
         elseif ttype == ')'
             inbraces -= 1
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
         else
-            position = skiptoken(str, position)
+            pstn = skiptoken(str, pstn)
         end
     end
     push!(lexemends, ncodeunits(str))
@@ -1013,10 +1015,18 @@ function picktoken(str, i)
     c = str[i]
     if isspace(c) && c != '\n'
         return ' '
-    elseif islbrace(c)
+#    elseif islbrace(c)
+#        return '('
+#    elseif isrbrace(c)
+#        return ')'
+    elseif c == '('
         return '('
-    elseif isrbrace(c)
+    elseif c == ')'
         return ')'
+    elseif c == '['
+        return '['
+    elseif c == ']'
+        return ']'
     elseif isdigit(c)
         return 'd'
     elseif isletter(c)
@@ -1054,9 +1064,26 @@ function catchtokenstring(str, i)
         end
     end
 end
+function catchbrackets(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    @assert str[i] == '['
+    inbraces = 1
+    start = nextind(str, i)
+    while true
+        i = nextind(str, i)
+        eos() && return start, prevind(str, i)
+        if picktoken(str, i) == '['
+            inbraces += 1
+        elseif inbraces == 1 && picktoken(str, i) == ']'
+            return start, prevind(str, i)
+        elseif picktoken(str, i) == ']'
+            inbraces -= 1
+        end
+    end
+end
 function catchbraces(str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    @assert str[i] == '(' || str[i] == '['
+    @assert str[i] == '('
     inbraces = 1
     start = nextind(str, i)
     while true
@@ -1197,6 +1224,7 @@ skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : 
 skipspaces(str, i)    = catchspaces(str, i)[2] + 1
 skipcomment(str, i)   = catchcomment(str, i)[2] + 1
 skipbraces(str, i)    = nextind(str, nextind(str, catchbraces(str, i)[2]))
+skipbrackets(str, i)  = nextind(str, nextind(str, catchbrackets(str, i)[2]))
 isoneline(str)        = !('\n' in str)
 existind(str, i)      = thisind(str, min(max(1,i), ncodeunits(str)))
 
@@ -1658,7 +1686,6 @@ function collectformat(code)
 end
 
 function convertformat(formatstring)
-    rep = r"^(\d+)(.*)$"
     FMT = OrderedDict(
         r"^\/$"           => "\\n",               # / -> START NEW RECORD
         r"^(\d*)P$"i      => "",                  # Scale Factor (P): scale from/to mantissa
@@ -1678,26 +1705,39 @@ function convertformat(formatstring)
         r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
         r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
     )
-    format = splitformat(formatstring)
+    format = parseformat(formatstring)
+    #@show format, formatstring
 
-    # eval repeats in the format
-    format2 = Vector{String}(undef, 0)
-    for (i,el) in enumerate(format)
-        if occursin(rep, el)
-            num = parse(Int, replace(el, rep=>s"\1"))
-            str = replace(el, rep => s"\2")
-            occursin(r"\(.*\)", str) && (str = replace(str,  r"\((.*)\)"=> s"\1"))
-            [push!(format2, str) for j=1:num]
-        else
-            push!(format2, el)
-        end
-    end
-    format = format2
-    # make conversion
+    # converting
     for rs in FMT
         format = map( a->replace(a, rs), format)
     end
     return foldl(*, format)
+end
+
+function parseformat(formatstring)
+    rep = r"^(\d+)(.*)$"
+    formatparts = splitformat(formatstring)
+    #@show formatparts, formatstring
+
+    # eval repeats in the format
+    format = Vector{String}(undef, 0)
+    for (i,el) in enumerate(formatparts)
+        if occursin(rep, el)
+            num = parse(Int, replace(el, rep=>s"\1"))
+            str = replace(el, rep => s"\2")
+            if occursin(r"\(.*\)", str)
+                str = replace(str,  r"\((.*)\)"=> s"\1")
+                fmt = parseformat(str)
+                [append!(format, fmt) for j=1:num]
+            else
+                [push!(format, str) for j=1:num]
+            end
+        else
+            push!(format, el)
+        end
+    end
+    return format
 end
 
 function processcommon(code, commons, arrays)
@@ -1841,30 +1881,26 @@ function processparameters(code)
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
 end
 
-function processdata(code, arrays)
+function processdatastatement(code, arrays)
     code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
     rx = r"^\h*\bdata\b"mi
-    #rx = r"^\h*\bdata\b\h*[.\w]+(?:\h*\[\h*\d+\h*\]|)\h*\/"mi
     for m in reverse(collect(eachmatch(rx, code1)))
         r = continuedlinesrange(code1, m.offset)
         line = code1[r]
         str = lex = ""
-        p = 1; datataken = inlist = itvector = afterlist = false
+        p = 1; datataken = inlist = itscal = itvector = afterlist = false
         while true
             ttype = picktoken(line, p)
-            #print("_$ttype")
             if ttype == 'e'
                 str *= '\n'
                 break
+            elseif ttype == '['
+                p1 = p; p = skipbrackets(line, p)
+                str *= line[p1:prevind(line, p)]
+                itscal = true
             elseif ttype == '('
                 p1 = p; p = skipbraces(line, p)
                 str *= line[p1:prevind(line, p)]
-            #elseif ttype == '#'
-            #    p1 = p; p = skipcomment(line, p)
-            #    str *= line[p1:prevind(line, p)]
-            #elseif ttype == ' '
-            #    p1 = p; p = skipspaces(line, p)
-            #    str *= line[p1:prevind(line, p)]
             elseif !datataken && ttype == 'l'
                 lex, p = taketoken(line, p) # "DATA"
                 @assert uppercase(lex) == "DATA"
@@ -1873,28 +1909,18 @@ function processdata(code, arrays)
             elseif ttype == 'l'
                 p1 = p; lex, p = taketoken(line, p)
                 str *= line[p1:prevind(line, p)]
-            #elseif ttype = '(' || ttype = '[' # should be implied-do-loop or array index
-            #    p1 = p; p = skiptoken(line, p)
-            #    str *= line[p1:prevind(line, p)]
             elseif ttype == '/'
-                #if !inlist
-                    inlist = true
-                    p1 = p; p = nextind(line, p)
-                    p2 = skipupto('/', line, p)
-                    pend = prevind(line, p2)
-                    itvector = occursin(',', line[p:pend]) || lex in arrays ||
-                               !isnothing(match(r"\d\h*\*", line[p:pend]))
-                    str *= itvector ? " .= (" : " = "
-                    # here should be the repeats catching
-                    #str *= line[p:pend]
-                    str *= replace(line[p:pend], r"(\d) (\d)"=>s"\1_\2")
-                    p = p2
-                #else
-                    p = nextind(line, p)
-                    itvector && (str *= ')')
-                    afterlist = true
-                    inlist = itvector = false
-                #end
+                p1 = p; p = nextind(line, p)
+                p = skipupto('/', line, p)
+                itvector = (lex in arrays && !itscal)
+                str[end:end] != ' ' && (str *= ' ')
+                str *= itvector ? ".= (" : "= "
+                # here should be the repeats catching
+                str *= replace(line[nextind(line,p1):prevind(line,p)], r"(\d) (\d)"=>s"\1\2")
+                p = skiptoken(line, p)
+                itvector && (str *= ')')
+                afterlist = true
+                itscal = itvector = false
             elseif ttype == ',' && afterlist
                 p = skiptoken(line, p)
                 str *= ';'
