@@ -187,7 +187,9 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code = processconditionalgotos(code)
 
+        write("test.jl", code)
         code = processiostatements(code, formats)
+        write("test2.jl", code)
 
         code, strings = saveallstrings(code)
 
@@ -206,7 +208,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = processparameters(code)
 
         #write("test.jl", code)
-        code = processdata(code)
+        code = processdata(code, vcat(arrays,"view"))
 
         code = splatprintviews(code)
 
@@ -1040,6 +1042,7 @@ function catchtokenvar(str, i)
 end
 function catchtokenstring(str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    @assert str[i] == '''
     start = nextind(str, i)
     while true
         i = nextind(str, i)
@@ -1048,6 +1051,23 @@ function catchtokenstring(str, i)
             i = nextind(str, i)
         elseif picktoken(str, i) == '''
             return start, prevind(str, i)
+        end
+    end
+end
+function catchbraces(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    @assert str[i] == '(' || str[i] == '['
+    inbraces = 1
+    start = nextind(str, i)
+    while true
+        i = nextind(str, i)
+        eos() && return start, prevind(str, i)
+        if picktoken(str, i) == '('
+            inbraces += 1
+        elseif inbraces == 1 && picktoken(str, i) == ')'
+            return start, prevind(str, i)
+        elseif picktoken(str, i) == ')'
+            inbraces -= 1
         end
     end
 end
@@ -1159,6 +1179,9 @@ function marktoken(str, i)
     elseif ttype == 'd'  # catch integer number
         startpos, endpos = catchtoken(str, i)
         return startpos, endpos, nextind(str, endpos)
+    #elseif ttype == '('  # catch paired braces
+    #    startpos, endpos = catchbraces(str, i)
+    #    return startpos, endpos, nextind(str, nextind(str, endpos))
     elseif ttype == '*'  # catch '**' operator
         startpos, endpos = catchtoken(str, i)
         return startpos, endpos, nextind(str, endpos)
@@ -1173,6 +1196,7 @@ skiptoken(str, i)     =  marktoken(str, i)[3]
 skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : i
 skipspaces(str, i)    = catchspaces(str, i)[2] + 1
 skipcomment(str, i)   = catchcomment(str, i)[2] + 1
+skipbraces(str, i)    = nextind(str, nextind(str, catchbraces(str, i)[2]))
 isoneline(str)        = !('\n' in str)
 existind(str, i)      = thisind(str, min(max(1,i), ncodeunits(str)))
 
@@ -1185,6 +1209,9 @@ function skipwhitespaces(str, i)
     return i
 end
 
+"""
+return the last position of token of requested char
+"""
 function skipupto(c, str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     while true
@@ -1814,22 +1841,95 @@ function processparameters(code)
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
 end
 
-function processdata(code)
+function processdata(code, arrays)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
+    rx = r"^\h*\bdata\b"mi
+    #rx = r"^\h*\bdata\b\h*[.\w]+(?:\h*\[\h*\d+\h*\]|)\h*\/"mi
+    for m in reverse(collect(eachmatch(rx, code1)))
+        r = continuedlinesrange(code1, m.offset)
+        line = code1[r]
+        str = lex = ""
+        p = 1; datataken = inlist = itvector = afterlist = false
+        while true
+            ttype = picktoken(line, p)
+            #print("_$ttype")
+            if ttype == 'e'
+                str *= '\n'
+                break
+            elseif ttype == '('
+                p1 = p; p = skipbraces(line, p)
+                str *= line[p1:prevind(line, p)]
+            #elseif ttype == '#'
+            #    p1 = p; p = skipcomment(line, p)
+            #    str *= line[p1:prevind(line, p)]
+            #elseif ttype == ' '
+            #    p1 = p; p = skipspaces(line, p)
+            #    str *= line[p1:prevind(line, p)]
+            elseif !datataken && ttype == 'l'
+                lex, p = taketoken(line, p) # "DATA"
+                @assert uppercase(lex) == "DATA"
+                str *= ' '^length(lex)
+                datataken = true
+            elseif ttype == 'l'
+                p1 = p; lex, p = taketoken(line, p)
+                str *= line[p1:prevind(line, p)]
+            #elseif ttype = '(' || ttype = '[' # should be implied-do-loop or array index
+            #    p1 = p; p = skiptoken(line, p)
+            #    str *= line[p1:prevind(line, p)]
+            elseif ttype == '/'
+                #if !inlist
+                    inlist = true
+                    p1 = p; p = nextind(line, p)
+                    p2 = skipupto('/', line, p)
+                    pend = prevind(line, p2)
+                    itvector = occursin(',', line[p:pend]) || lex in arrays ||
+                               !isnothing(match(r"\d\h*\*", line[p:pend]))
+                    str *= itvector ? " .= (" : " = "
+                    # here should be the repeats catching
+                    #str *= line[p:pend]
+                    str *= replace(line[p:pend], r"(\d) (\d)"=>s"\1_\2")
+                    p = p2
+                #else
+                    p = nextind(line, p)
+                    itvector && (str *= ')')
+                    afterlist = true
+                    inlist = itvector = false
+                #end
+            elseif ttype == ',' && afterlist
+                p = skiptoken(line, p)
+                str *= ';'
+                afterlist = false
+            else
+                p1 = p; p = skiptoken(line, p)
+                str *= line[p1:prevind(line, p)]
+            end
+        end
+        o = m.offset
+        l = ncodeunits(m.match)
+        code1 = code1[1:prevind(code1,r[1])] * str * code1[nextind(code1,r[end]):end]
+    end
+
+    return code isa AbstractVector ? split(code1, '\n') : code1
+end
+function processdata1(code)
     patterns = [
         r"^\h*\bdata\b\h*[.\w]+(?:\h*\[\h*\d+\h*\]|)\h*\/"mi
     ]
     marked = markbypattern(patterns, code)
 
     # 'DATA A/1/' -- scalars initializations
-    rx = r"(\b\w+\b(?:\h*\[\h*\d+\h*\]|)\h*)(\/((?>[^,\/\n*#]*|(?1))*)\/)"mi
-    ss = s"\1 = \3"
+    rx = r"(\b\w+\b(?:\h*\[\h*\d+\h*\]|))\h*(\/((?>[^,\/\n*#]*|(?1))*)\/)"mi
+    rxc = r"(\b\w+\b(?:\h*\[\h*\d+\h*\]|))\h*(\/((?>[^,\/\n*#]*|(?1))*)\/)(\h*,)"mi
+    #ss = s"\1 = \3"
     lines, comments = splitoncomment(code)
     for i in marked
-        lines[i] = replace(lines[i], rx => ss)
+        lines[i] = replace(lines[i], rxc => s"\1 = \3; ")
+        lines[i] = replace(lines[i], rx  => s"\1 = \3")
     end
     lines = map(*, lines, comments)
     code1 = foldl((a,b) -> a*'\n'*b, lines)
 
+        #write("test.jl", code1)
     replacements = OrderedDict(
     # DATA statements https://regex101.com/r/Z0neJ8/1 https://regex101.com/r/XAol49/2
     r"^(\h*)(data\h*)([.\w]+)\h*(\/((?>[^\/,]++|(?3))*)\/)"mi => @s_str("\\1\\3 = \\5"),
@@ -1844,7 +1944,7 @@ function processdata(code)
 
     # gather all remaining 'DATA'
     rx = r"(\b\w+\b\h*)(\/((?>[^\/\n#]*|(?1))*)\/)"mi
-    ss = s"\1 .= (\3)"
+    ss = s"\1 = (\3)"
     lines, comments = splitoncomment(code1)
     for i in marked
         lines[i] = replace(lines[i], rx => ss)
