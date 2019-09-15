@@ -337,8 +337,6 @@ function markbysubroutine(code)
     end
 
     rx = r"^\h*(end\h*(?!do|if)|\bcontains\b)"i
-    #rx = r"^\h*end\h*(?!do|if)"i
-    ##rx = r"^\h*end\h*(?:(function|subroutine|program|module|)\h*\w*)"i
     marked = sort(collect(marked))
     for i = length(marked):-1:2
         for j = marked[i]:-1:marked[i-1]
@@ -364,15 +362,10 @@ function convertfortrancomments(code)
 end
 
 function stripcomments(code)
-    # https://regexr.com/4j4vi via
-    # https://stackoverflow.com/questions/9203774/regular-expression-for-comments-but-not-within-a-string-not-in-another-conta
-    juliacomments = r"(#=([^*]|\*(?!#))*?=#|#[^\"\n\r]*(?:\"[^\"\n\r]*\"[^\"\n\r]*)*[\r\n])(?=[^\"]*(?:\"[^\"]*\"[^\"]*)*$)"m
-    dlms = [r"#"m]
+    dlm = r"#"m
     lines = splitonlines(code)
     for i in axes(lines,1)
-        for dlm in dlms
-            lines[i] = split(lines[i], dlm, limit=2, keepempty=true)[1]
-        end
+        lines[i] = split(lines[i], dlm, limit=2, keepempty=true)[1]
         lines[i] = rstrip(lines[i])
     end
     return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
@@ -478,6 +471,7 @@ function commentoutdeclarations(code)
         r"^\h*logical\h+(?!.*function)"mi,
         r"^\h*allocatable\h+"mi,
         r"^\h*entry\h+.*"mi,
+        r"^\h*save\h+.*"mi,
         r"^\h+\d+\h+format\h*\("mi
     ]
 
@@ -996,26 +990,12 @@ end
 
 function picktoken(str, i)
     # may be there should be used `Base.Unicode.category_abbrev()` or `Base.Unicode.category_code()`
-    islbrace(c::AbstractChar) = c=='(' || c=='['
-    isrbrace(c::AbstractChar) = c==')' || c==']'
     len = ncodeunits(str)
     i = thisind(str, i)
     i > len && return 'e'
     c = str[i]
     if isspace(c) && c != '\n'
         return ' '
-#    elseif islbrace(c)
-#        return '('
-#    elseif isrbrace(c)
-#        return ')'
-    elseif c == '('
-        return '('
-    elseif c == ')'
-        return ')'
-    elseif c == '['
-        return '['
-    elseif c == ']'
-        return ']'
     elseif isdigit(c)
         return 'd'
     elseif isletter(c)
@@ -1331,14 +1311,15 @@ end
 function processconditionalgotos(code)
     lines = splitonlines(code)
     # https://regex101.com/r/nKZmku/3
-    rx = r"^(\h*|)go\h*?to\h*\(\h*\d+\h*,.*$"i
-    rxfull = r"^(\h*|)go\h*?to\h*\((\h*\d+\h*(?:\h*,\h*\d+\h*)*)\)\h*([^#]*)\h*(#.*|)$"i
+    rx = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*\(\h*\d+\h*,.*$"i
+    rxfull = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*\((\h*\d+\h*(?:\h*,\h*\d+\h*)*)\)(?:\h*,|)\h*([^#]*)\h*(#.*|)$"i
     i = 1
     while true
         if occursin(rx, lines[i])
             # cut out this line with all continuations
-            head = replace(lines[i], rx=>s"\1")
-            str = "" * lines[i]
+            reflabel = replace(lines[i], rx=>s"\1")
+            head = ' '^length(reflabel)
+            str = lines[i]
             while iscontinued(lines[i], i<length(lines) ? lines[i+1] : "")
                 splice!(lines, i)
                 str = concatlines(str,lines[i])
@@ -1347,9 +1328,39 @@ function processconditionalgotos(code)
             # replace with branch of julia's `if else` statements
             gotos = map(strip, split(replace(str, rxfull => s"\2"), ','))
             var = replace(str, rxfull => s"\3")
-            ifexpr = "" * head
+            ifexpr = reflabel
             for (i,g) = enumerate(gotos)
                 ifexpr *= "if ($(var) .eq. $(i)) then\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
+            end
+            ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label " *
+                      "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
+                      "in goto list\")\n$(head)end\n"
+            insert!(lines, i, ifexpr)
+        end
+        i += 1
+        i > length(lines) && break
+    end
+    # https://regex101.com/r/nHwb10/2
+    rx = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*\w+\h*(?:,\h*|)\(\h*\d+\h*,.*$"i
+    rxfull = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*(\w+)\h*(?:,\h*|)\((\h*\d+\h*(?:\h*,\h*\d+\h*)*)\)\h*(#.*|)$"i
+    i = 1
+    while true
+        if occursin(rx, lines[i])
+            # cut out this line with all continuations
+            reflabel = replace(lines[i], rx=>s"\1")
+            head = ' '^length(reflabel)
+            str = lines[i]
+            while iscontinued(lines[i], i<length(lines) ? lines[i+1] : "")
+                splice!(lines, i)
+                str = concatlines(str,lines[i])
+            end
+            splice!(lines, i)
+            # replace with branch of julia's `if else` statements
+            gotos = map(strip, split(replace(str, rxfull => s"\3"), ','))
+            var = replace(str, rxfull => s"\2")
+            ifexpr = reflabel
+            for (i,g) = enumerate(gotos)
+                ifexpr *= "if ($(var) .eq. $(g)) then\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
             end
             ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label " *
                       "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
@@ -1550,6 +1561,7 @@ function stripwhitesinbrackets(lines)
 end
 
 function processimplieddoloops(code)
+    W(s) = replace("$s", " " => "")
     code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
     # should be:
     # `A = [(real(I), I=3, 5)]` => `A = [real(I) for I=3, 5]`
@@ -1561,23 +1573,25 @@ function processimplieddoloops(code)
     # https://pages.mtu.edu/~shene/COURSES/cs201/NOTES/chap08/io.html<Paste>
     # ( item-1, item-2, ...., item-n, DO-var = initial, final, step )
     # https://regex101.com/r/RW27vC/2
-    rxbr = r"(\(((?>[^()]++|(?1))*)\))"
-    rxsqbr = r"\[\h*(\(((?>[^()]++|(?1))*)\))\h*\]"
-    rxslbr = r"\/\h*(\(((?>[^()]++|(?1))*)\))\h*\/"
+    rxbr = r"(?<=\W)(\(((?>[^()]++|(?1))*)\))"
+    rxsqbr = r"(?<=\W)\[\h*(\(((?>[^()]++|(?1))*)\))\h*\]"
+    rxslbr = r"(?<=\W)\/\h*(\(((?>[^()]++|(?1))*)\))\h*\/"
 
     for m in reverse(collect(eachmatch(rxsqbr, code1)))
         str = m.captures[2]
         if occursin('=', str)
             str = processimplieddoloops(str)
             ex = nothing
-            try ex = Meta.parse('('*str*')') catch end
+            if length(collect(eachmatch(r"=", str))) == 1
+                try ex = Meta.parse('('*str*')') catch end
+            end
             #(ex == nothing || ex.head == :incomplete) && continue
             if (p = matchex(:(_E, _I = _1, _2, _INC), ex)) != nothing
                 iex, var, r1, r2, inc = p[:_E], p[:_I], p[:_1], p[:_2], p[:_INC]
-                code1 = replace(code1, m.match => "[$iex for $var = $r1:$inc:$r2]")
+                code1 = replace(code1, m.match => "[$iex for $var = $(W(r1)):$(W(inc)):$(W(r2))]")
             elseif (p = matchex(:(_E, _I = _1, _2), ex)) != nothing
                 iex, var, r1, r2 = p[:_E], p[:_I], p[:_1], p[:_2]
-                code1 = replace(code1, m.match => "[$iex for $var = $r1:$r2]")
+                code1 = replace(code1, m.match => "[$iex for $var = $(W(r1)):$(W(r2))]")
             else
                 code1 = replace(code1, m.match => "[("*str*")]")
             end
@@ -1589,39 +1603,44 @@ function processimplieddoloops(code)
         if occursin('=', str)
             str = processimplieddoloops(str)
             ex = nothing
-            try ex = Meta.parse('('*str*')') catch end
+            if length(collect(eachmatch(r"=", str))) == 1
+                try ex = Meta.parse('('*str*')') catch end
+            end
             #@show str, ex
             if (p = matchex(:(_NAME(_E), _I = _1, _2, _INC), ex)) != nothing ||
                (p = matchex(:(_NAME[_E], _I = _1, _2, _INC), ex)) != nothing
                 nam, iex, var, r1, r2, inc = p[:_NAME], p[:_E], p[:_I], p[:_1], p[:_INC], p[:_2]
                 r1, r2 = map(r -> rewrite_all(iex, [var => r]), (r1, r2))
-                str = "view($nam, $r1:$inc:$r2)"
+                str = "view($nam, $(W(r1)):$(W(inc)):$(W(r2)))"
             elseif (p = matchex(:(_NAME(_E1,_E2), _I = _1, _2, _INC), ex)) != nothing ||
                    (p = matchex(:(_NAME[_E1,_E2], _I = _1, _2, _INC), ex)) != nothing
                 nam, iex1, iex2, var, r1, r2, inc =
                     p[:_NAME], p[:_E1], p[:_E2], p[:_I], p[:_1], p[:_INC], p[:_2]
                 if matchingex(var, iex1)
                     r1, r2 = map(r -> rewrite_all(iex1, [var => r]), (r1, r2))
-                    str = "view($nam, $r1:$inc:$r2, $iex2)"
+                    str = "view($nam, $(W(r1)):$(W(inc)):$(W(r2)), $(W(iex2)))"
                 else
                     r1, r2 = map(r -> rewrite_all(iex2, [var => r]), (r1, r2))
-                    str = "view($nam, $iex1, $r1:$inc:$r2)"
+                    str = "view($nam, $(W(iex1)), $(W(r1)):$(W(inc)):$(W(r2)))"
                 end
             elseif (p = matchex(:(_NAME(_E), _I = _1, _2), ex)) != nothing ||
                    (p = matchex(:(_NAME[_E], _I = _1, _2), ex)) != nothing
                 nam, iex, var, r1, r2 = p[:_NAME], p[:_E], p[:_I], p[:_1], p[:_2]
                 r1, r2 = map(r -> rewrite_all(iex, [var => r]), (r1, r2))
-                str = "view($nam, $r1:$r2)"
+                str = "view($nam, $(W(r1)):$(W(r2)))"
             elseif (p = matchex(:(_NAME(_E1,_E2), _I = _1, _2), ex)) != nothing ||
                    (p = matchex(:(_NAME[_E1,_E2], _I = _1, _2), ex)) != nothing
                 nam, iex1, iex2, var, r1, r2 = p[:_NAME], p[:_E1], p[:_E2], p[:_I], p[:_1], p[:_2]
                 if matchingex(var, iex1)
                     r1, r2 = map(r -> rewrite_all(iex1, [var => r]), (r1, r2))
-                    str = "view($nam, $r1:$r2, $iex2)"
+                    str = "view($nam, $(W(r1)):$(W(r2)), $(W(iex2)))"
                 else
                     r1, r2 = map(r -> rewrite_all(iex2, [var => r]), (r1, r2))
-                    str = "view($nam, $iex1, $r1:$r2)"
+                    str = "view($nam, $(W(iex1)), $(W(r1)):$(W(r2)))"
                 end
+            elseif (p = matchex(:(_E, _I = _1, _2), ex)) != nothing
+                iex, var, r1, r2 = p[:_E], p[:_I], p[:_1], p[:_2]
+                str = "($iex for $var = $(W(r1)):$(W(r2)))"
             else
                 str = '(' * str * ')'
             end
@@ -2047,7 +2066,7 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d\d\d)(\h+)continue(.*)$"mi => @s_str("   \\1\\3@label L\\2 \\4"),
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
     # https://regex101.com/r/J5ViSG/1
-    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n\n     \\3\\4"),
+    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n     \\3\\4"),
 )
 
 const singlewordreplacements = OrderedDict(
@@ -2098,6 +2117,8 @@ const singlewordreplacements = OrderedDict(
     r"\h*\.ge\.\h*"i => s" >= ",
     r"\h*\.gt\.\h*"i => s" > ",
     r"\h*\.lt\.\h*"i => s" < ",
+    # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
+    r"(\b(?!elseif|if|while|data|parameter)[\w_]+\b)[\h]+\("i => s"\1(",
     # Some specific functions
     # https://gcc.gnu.org/onlinedocs/gcc-9.2.0/gfortran/Intrinsic-Procedures.html
     # https://docs.oracle.com/cd/E19957-01/805-4939/6j4m0vnc8/index.html
@@ -2167,16 +2188,9 @@ const replacements = OrderedDict(
     r"@([\\])@" => "'\\\\'",
     # unescape "\/" in strings
     r"[\\][\/]" => s"/",
-    # Spaces around math operators
-    #r"([\*\+\/=])(?=\S)" => s"\1 ",
-    #r"(?<=\S)([\*\+\/=])" => s" \1",
-    # Spaces around - operators, except after e
-    # r"([^e][\-])(\S)" => s"\1 \2",
-    #r"(?<!\W\de)(\h*\-\h*)" => s" - ",
     # Space after commas in expressions
     r"(,)([^\s,\[\]\(\)]+\])" => s"@\2",
     r"(,)(\S)" => s"\1 \2",
-    #r"@" => ",",
     r"@(?!label)" => ",",
     # Replace XXXXXX with xxxxxx
     r"(\h*)\breturn\b(\h+end|)$"i => s"\1return nothing\2",
@@ -2188,7 +2202,6 @@ const replacements = OrderedDict(
     r"do\h+while\h*"i => s"while ",
     r"^(\h*)\bdo\b\h*$"i => s"\1while true",
     # Replace ELSE with else
-    #r"^(\s*)ELSE"m => s"\1else",
     r"^(\s*)\bELSE\b"m => s"\1else",
     # Relace END XXXX with end
     r"^(\h*)end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|do|if|select)\h*\w*$"mi => s"\1end",
@@ -2198,9 +2211,6 @@ const replacements = OrderedDict(
     r"\bcall\b(\h+)"i => s"",
     # Fix assignments
     r"(?<=[^\s=<>!/\\])=(?=[^\s=])" => " = ",
-    #r"(?<=[^\s=])=(?=[^\s=])" => " = ",
-    # splatting view() in print: https://regex101.com/r/SPfeco/3
-    #r"((?:\bat_iZjAcpPokMprintf\b|\bprintln\b).*?(?:\bview\b\h*))(\(((?>[^()]++|(?2))*)\))" => s"\1\2...",
     # Remove expression's brackets after if/elseif/while https://regex101.com/r/eF9bK5/17
     r"^(\h*)(if|elseif|while)(\h*)(\(((?>[^()]++|(?4))*)\))\h*$"m => s"\1\2\3\5",
     # breaks
@@ -2221,12 +2231,12 @@ const replacements = OrderedDict(
     r"^(\s*)go\h*to\s+(\d+)"mi => s"\1@goto L\2",
     r"(\h)go\h*to\s+(\d+)"mi => s"\1@goto L\2",
     r"(\W)go\h*to\s+(\d+)"mi => s"\1 @goto L\2",
+    # ASSIGN statement
+    r"^(\h*\d+:?\h*|\h*)ASSIGN\h*(\d+)\h*TO\h*(\w+)$"i => s"\1\3 = \2",
     # fix end
     r"^(.+[^ ])[ ]([ ]+)end$" => s"\1 end\2",
     # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
     r"(\b(?!elseif|if)[\w_]+\b)[\h]+\("i => s"\1(",
-    # Replace suberror with error and mark for fixup
-    r"(\W)suberror\((.*?),.*?\)" => s"\1 error(\2)",
     # Implicit declaration
     r"^\h*implicit(.*)"mi => s"",
     # main program
@@ -2258,15 +2268,7 @@ const headersprocessing = OrderedDict(
 
 # Patterns to remove
 const removal = [
-    ## Trailing whitespace
-    #r"\h*$"m,
-    # Variable declarations
-    #r"\n\s*real\s.*"i,
-    #r"\n\s*integer\*?\d*\s.*"i,
-    #r"\n\s*logical\s.*"i,
-    #r"\n\s*character\s.*"i,
-    #r"\n\s*character[*].*"i,
-    #r"\n\s*parameter\s.*"i,
+    # Declarations
     r"\n\s*implicit none"i,
     r"\n\s*real,\s*external\s.*"i,
     r"\n\s*external\s.*"i,
