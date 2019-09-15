@@ -188,9 +188,9 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code, strings = saveallstrings(code)
 
-        write("test.jl", code)
+        #write("test.jl", code)
         code = processconditionalgotos(code)
-        write("test2.jl", code)
+        #write("test2.jl", code)
 
         code = processifstatements(code)
         code = processarithmif(code)
@@ -392,7 +392,7 @@ end
 function processlinescontinuation(lines::AbstractVector)
     # `lines` should be lines without comments
     rx1 = r"^(.*[^,&])(&|)$"
-    rx2 = r"^([ ]{5}[^ ]\h*)([+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)(.*)$"
+    rx2 = r"^([ ]{5}[^ ]\h*)(//|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)(.*)$"
     # some fixes:
     # move arithmetic operator from start of continuator to tail of previous line
     for i = 2:length(lines)
@@ -477,6 +477,7 @@ function commentoutdeclarations(code)
         r"^\h*allocatable\h+"mi,
         r"^\h*entry\h+.*"mi,
         r"^\h*save\h+.*"mi,
+        r"^\h*equivalence\h+.*"mi,
         r"^\h+\d+\h+format\h*\("mi
     ]
 
@@ -602,7 +603,7 @@ end
 function iscontinued(line1, line2)
     if occursin(r"^[^#&]*&\h*(#\w+|)$"m, line1) ||  # free-form continuation
     #if occursin(r"^[^#&]*&\h*(#.*|)$"m, line1) ||  # free-form continuation
-       occursin(r"^     [.+&$\w].*$"m, line2)  #=||  # fixed-form startline continuation
+       occursin(r"^     \S.*$"m, line2)  #=||  # fixed-form startline continuation
        occursin(r"^[#]", line2)                  =#  # commented out line
         return true
     else
@@ -613,7 +614,7 @@ end
 function concatlines(line1, line2)
     # comments will be skipped
     return replace(line1, r"^([^#&]*)(&|)(\h*#.*|\h*)$"m => s"\1") *  # free-form continuation
-           replace(line2, r"^(     [.+&$\w]|)(.*)$"m => s"\2")        # fixed-form startline continuation
+           replace(line2, r"^(     \S|)(.*)$"m => s"\2")        # fixed-form startline continuation
 end
 
 function processdostatements(code)
@@ -1416,7 +1417,7 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
                 if dolabels[m.captures[2]] > 0
                     lines[i] = " "^length(m.captures[1]) * replace(lines[i], rxlabel=>s"\3")
                     for _ = 1:dolabels[m.captures[2]]
-                        lines[i] = lines[i] * "\n" * m.captures[1] * "continue"
+                        lines[i] *= "\n" * m.captures[1] * "continue"
                     end
                 end
             end
@@ -1438,6 +1439,10 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
             end
             lines[i] = " "^length(m.captures[1]) * "end do"
             dolabels[m.captures[2]] -= 1
+            for _ = dolabels[m.captures[2]]:-1:1
+                lines[i] *= '\n' * ' '^length(m.captures[1]) * "end do"
+            end
+            dolabels[m.captures[2]] = 0
         end
     end
 
@@ -2058,7 +2063,7 @@ function processdatastatement(code, arrays)
                 str[end:end] != ' ' && (str *= ' ')
                 str *= itvector ? ".= (" : "= "
                 # TODO: here the repeats should be caught
-                str *= replace(line[nextind(line,p1):prevind(line,p)], r"(\d) (\d)"=>s"\1\2")
+                str *= replace(line[nextind(line,p1):prevind(line,p)], r"(?<=\d) ([\dDE])"i=>s"\1")
                 p = skiptoken(line, p)
                 itvector && (str *= ')')
                 afterlist = true
@@ -2259,6 +2264,9 @@ const singlewordreplacements = OrderedDict(
     r"\blen\b\h*\("i => "length(",
     # https://regex101.com/r/whrGry/1
     r"(?:\blen_trim\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
+    r"\bbackspace\b\h+(\w+)"i => s"seek(\1, position(\1)-1) # BACKSPACE \1",
+    r"\brewind\b\h+(\w+)"i => s"seek(\1, 0) # REWIND \1",
+    r"\bend\h*file\b\h+(\w+)"i => s"seekend(\1) # ENDFILE \1",
 
     r"\bMPI_SEND\b\h*\("i  => "MPI.Send(",
     r"\bMPI_ISEND\b\h*\("i => "MPI.Isend(",
@@ -2346,7 +2354,7 @@ const replacements = OrderedDict(
     # main program
     r"^(\h*)program\h*$"mi => s"\1PROGRAM NAMELESSPROGRAM",
     # rstrip()
-    r"\h*$" => s"", 
+    r"\h*$" => s"",
 )
 
 const headersprocessing = OrderedDict(
