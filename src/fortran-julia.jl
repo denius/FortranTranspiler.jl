@@ -27,9 +27,6 @@ using DataStructures, Printf, Espresso, JuliaFormatter
       the appropriate value in the initial part of the function code.
     * julia can't propagate back changed values of scalars via functions args, unlike fortran.
       Thus such changed scalars should be returned via functions `return` statement.
-    * fortran functions returns the result via assignment the returned
-      to variable with function's self name, in julia it is the reassignment,
-      thus should be fixed
     * all strings in fortran are `Vector{Char}` and should stay same type to preserve
       assignment statements. (Use `join()` and `collect()` to convert to strings and back)
     * whitespaces matter despite of the old fortran, which can ignore them all:
@@ -85,6 +82,7 @@ function printusage()
         --packarrays
         --strings
         --single           Evaluate 1.0E0 as Float32. Double precision in fortran is 1.0D0
+        -n, --dry-run
 ")
 end
 
@@ -176,23 +174,28 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         # comment out all vars declarations
         code = commentoutdeclarations(code)
 
-        code, commentstrings = savecomments(code)
-
         code = processcommon(code, commons, arrays)
+
+        code, commentstrings = savecomments(code)
 
         code = processdostatements(code)
 
         dolabels, gotolabels = collectlabels(code)
         code = replacedocontinue(code, dolabels, gotolabels)
 
-        code = processconditionalgotos(code)
-
         code, formats = processiostatements(code, formats)
         veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
 
         code, strings = saveallstrings(code)
 
+        write("test.jl", code)
+        code = processconditionalgotos(code)
+        write("test2.jl", code)
+
         code = processifstatements(code)
+        code = processarithmif(code)
+
+        code = shapinglabels(code)
 
         #write("test.jl", code)
         # process replacements
@@ -271,6 +274,7 @@ function parse_args(lines)
     args["--quiet"]         = args["-q"]  = false
     args["--verbose"]       = args["-v"]  = false
     args["--veryverbose"]   = args["-vv"] = false
+    args["--dry-run"]       = args["-n"]  = false
     args["--uppercase"]     = false
     args["--lowercase"]     = false
     args["--greeks"]        = false
@@ -388,7 +392,8 @@ end
 function processlinescontinuation(lines::AbstractVector)
     # `lines` should be lines without comments
     rx1 = r"^(.*[^,&])(&|)$"
-    rx2 = r"^([ ]{5}[^ ]\h*)([+*\/,-]|==|<=|>=|!=|<|>|&&|\|\||=)(.*)$"
+    rx2 = r"^([ ]{5}[^ ]\h*)([+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)(.*)$"
+    # some fixes:
     # move arithmetic operator from start of continuator to tail of previous line
     for i = 2:length(lines)
         if (m2 = match(rx2, lines[i])) != nothing
@@ -408,7 +413,7 @@ end
 function concatlinecontinuation(code)
     # Note: trailing comments are not allowed here
     replacements = OrderedDict(
-        r"\n     [.+&$\w]\h*" => " ",  # fixed-form startline continuations
+        r"\n     \S\h*" => " ",  # fixed-form startline continuations
         r"&\n"                => ""    # free-form continuations
     )
     code1 = deepcopy(code)
@@ -571,6 +576,8 @@ function collectvars(code)
     scalars = unique(vcat(scalars, arrays))
     scalars = scalars[findall(a->a ∉ arrays, scalars)]
 
+    @assert "" ∉ arrays
+    @assert "" ∉ scalars
     return scalars, arrays
 end
 
@@ -1285,7 +1292,7 @@ function collectlabels(code)
     lines = splitonlines(code1)
 
     # capture 'DO's and 'GOTO's labels
-    dolabels = Set{String}()
+    dolabels = Accumulator{String,Int}()
     gotolabels = Set{String}()
     rx = r"^(?:\h*\d+:?\h*|\h*)(?:do|for)\h*(\d+)(?:\h*,|)\h*\w+\h*="i
     #rx = r"^\h*(?:do|for)\h+(\d+)\h+"i
@@ -1310,15 +1317,16 @@ end
 
 function processconditionalgotos(code)
     lines = splitonlines(code)
+    # GOTO (10,20,30,40) SOMEEXPR
     # https://regex101.com/r/nKZmku/3
-    rx = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*\(\h*\d+\h*,.*$"i
-    rxfull = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*\((\h*\d+\h*(?:\h*,\h*\d+\h*)*)\)(?:\h*,|)\h*([^#]*)\h*(#.*|)$"i
+    rx = r"(\h*\d+:?\h*|\h*)go\h*?to\h*\(\h*\d+\h*,.*"i
+    rxfull = r"^(\h*\d+:?\h*|\h*)(.*?|)(\h*|)go\h*?to\h*\((\h*\d+\h*(?:,\h*\d+\h*)*)\)(?:\h*,|)\h*([^#\n]*)\h*(#.*|)$"i
     i = 1
     while true
         if occursin(rx, lines[i])
             # cut out this line with all continuations
-            reflabel = replace(lines[i], rx=>s"\1")
-            head = ' '^length(reflabel)
+            #reflabel = replace(lines[i], rx=>s"\1")
+            #head = ' '^length(reflabel)
             str = lines[i]
             while iscontinued(lines[i], i<length(lines) ? lines[i+1] : "")
                 splice!(lines, i)
@@ -1326,29 +1334,46 @@ function processconditionalgotos(code)
             end
             splice!(lines, i)
             # replace with branch of julia's `if else` statements
-            gotos = map(strip, split(replace(str, rxfull => s"\2"), ','))
-            var = replace(str, rxfull => s"\3")
-            ifexpr = reflabel
+            c = match(rxfull, str).captures
+            hl = length(c[1]); head = ' '^hl
+            if isempty(strip(c[2]))
+                ifexpr = c[1]
+                tail = isempty(strip(c[6])) ? "" : "\n$(head)$(c[6])"
+            else # there can prepend only the one-line-if, thus expand it to multiline
+                @assert occursin(r"^if"i, c[2]) == true
+                head *= "    "
+                ifexpr = "$(c[1])$(c[2]) then\n$head"
+                tail = isempty(strip(c[6])) ? "\n$(' '^hl)end" : "\n$(head)$(c[6])\n$(' '^hl)end"
+            end
+            expr = c[5]; gotos = map(strip, split(c[4], ','))
+            if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
+                cond = expr
+            else
+                cond = @sprintf "GTO%s" mod(hash("$(expr)"), 2^16)
+                ifexpr *= head * "$cond = $expr\n"
+            end
             for (i,g) = enumerate(gotos)
-                ifexpr *= "if ($(var) .eq. $(i)) then\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
+                ifexpr *= "if ($(cond) .eq. $(i)) then\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
             end
             ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label " *
-                      "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
-                      "in goto list\")\n$(head)end\n"
+                      "$(cond)=quote_iZjAcpPokM\$($(cond))quote_iZjAcpPokM " *
+                      "in goto list\")\n$(head)end$(tail)"
             insert!(lines, i, ifexpr)
         end
         i += 1
         i > length(lines) && break
     end
-    # https://regex101.com/r/nHwb10/2
-    rx = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*\w+\h*(?:,\h*|)\(\h*\d+\h*,.*$"i
-    rxfull = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*(\w+)\h*(?:,\h*|)\((\h*\d+\h*(?:\h*,\h*\d+\h*)*)\)\h*(#.*|)$"i
+
+    # GOTO EXPR,(10,20,30,40)
+    # https://regex101.com/r/nHwb10/4
+    # https://regex101.com/r/iYG7BH/6
+    rx = r"(\h*\d+:?\h*|\h*)go\h*?to\h*\w+\h*(?:,\h*|)\(\h*\d+\h*,.*"i
+    #rx = r"^(\h*\d+:?\h*|\h*)go\h*?to\h*\w+\h*(?:,\h*|)\(\h*\d+\h*,.*$"i
+    rxfull = r"^(\h*\d+:?\h*|\h*)(.*?|)(\h*|)go\h*?to\h+(\w+)\h*(?:,\h*|)\((\h*\d+\h*(?:,\h*\d+\h*)*)\)(.*)$"i
     i = 1
     while true
         if occursin(rx, lines[i])
             # cut out this line with all continuations
-            reflabel = replace(lines[i], rx=>s"\1")
-            head = ' '^length(reflabel)
             str = lines[i]
             while iscontinued(lines[i], i<length(lines) ? lines[i+1] : "")
                 splice!(lines, i)
@@ -1356,15 +1381,18 @@ function processconditionalgotos(code)
             end
             splice!(lines, i)
             # replace with branch of julia's `if else` statements
-            gotos = map(strip, split(replace(str, rxfull => s"\3"), ','))
-            var = replace(str, rxfull => s"\2")
-            ifexpr = reflabel
+            c = match(rxfull, str).captures
+            head = ' '^length(c[1])
+            tail = isempty(strip(c[6])) ? "" : "\n$(head)$(c[6])"
+            @assert c[2] == ""
+            ifexpr = isempty(strip(c[2])) ? c[1] : c[1] * c[2] * '\n' * head
+            var = c[4]; gotos = map(strip, split(c[5], ','))
             for (i,g) = enumerate(gotos)
                 ifexpr *= "if ($(var) .eq. $(g)) then\n$(head)    at_iZjAcpPokMgoto L$(g)\n$(head)else"
             end
             ifexpr *= "\n$(head)    at_iZjAcpPokMerror(\"non-exist label " *
                       "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
-                      "in goto list\")\n$(head)end\n"
+                      "in goto list\")\n$(head)end$(tail)"
             insert!(lines, i, ifexpr)
         end
         i += 1
@@ -1384,10 +1412,12 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
     if !dontfixcontinue
         for i in axes(lines,1)
             if !isnothing(match(rxlabeled, lines[i])) && isnothing(match(rxcont, lines[i]))
-                m = match(rxlabel, lines[i])
-                if m.captures[2] in dolabels
+                (m = match(rxlabel, lines[i])) != nothing || continue
+                if dolabels[m.captures[2]] > 0
                     lines[i] = " "^length(m.captures[1]) * replace(lines[i], rxlabel=>s"\3")
-                    lines[i] = lines[i] * "\n" * m.captures[1] * "continue\n"
+                    for _ = 1:dolabels[m.captures[2]]
+                        lines[i] = lines[i] * "\n" * m.captures[1] * "continue"
+                    end
                 end
             end
         end
@@ -1398,7 +1428,7 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
     # replace 'LABEL CONTINUE' with 'end do'
     for i in axes(lines,1)
         m = match(rxcont, lines[i])
-        if !isnothing(m) && m.captures[2] in dolabels
+        if !isnothing(m) && dolabels[m.captures[2]] > 0
             if m.captures[2] in gotolabels
                 # 'CYCLE' emulation in the old fortran,
                 # beware to have 'GOTO LABEL' outside of the loop
@@ -1407,7 +1437,7 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
                 pop!(gotolabels, m.captures[2])
             end
             lines[i] = " "^length(m.captures[1]) * "end do"
-            pop!(dolabels, m.captures[2])
+            dolabels[m.captures[2]] -= 1
         end
     end
 
@@ -1415,7 +1445,7 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
     rx = r"^(\h*(?:do|for)\h+)(\d+)(\h+.*)$"i
     for i in axes(lines,1)
         m = match(rx, lines[i])
-        if !isnothing(m) && m.captures[2] in dolabels
+        if !isnothing(m) && dolabels[m.captures[2]] > 0
             lines[i] = replace(lines[i], rx => s"\1FIXME: L\2\3")
         end
     end
@@ -1428,15 +1458,23 @@ end
 replace array's braces with square brackets
 """
 function replacearraysbrackets(code, arrays)
+
+    # remove whitespace between array name and left brace
+    for a in arrays
+        rx = Regex("(\\b$(a)\\b)\\h+\\(","i")
+        code = replace(code, rx => s"\1(")
+    end
+
+    # lookup "ARRAYNAME(" and replace
     braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
     brackets = SubstitutionString("[\\1]")
     for a in arrays
-        w = Regex("\\b$(a)\\b","i") # whole word
-        for m in collect(eachmatch(w, code))
+        rx = Regex("\\b$(a)\\b\\(","i")
+        for m in collect(eachmatch(rx, code))
             o = m.offset
-            if code[min(o+length(a),end)] == '('
-                code = code[1:o-1] * replace(code[o:end], braces => brackets, count=1)
-            end
+            code = code[1:prevind(code,o+ncodeunits(a))] *
+                   replace(code[thisind(code,o+ncodeunits(a)):end], braces => brackets, count=1)
+            #code = code[1:prevind(code,o)] * replace(code[o:end], braces => brackets, count=1)
         end
     end
 
@@ -1700,12 +1738,12 @@ function convertformat(formatstring)
         r"^A(\d*)$"i      => s"%\1s",             # A9 -> %9s
         r"^I(\d*)$"i      => s"%\1i",             # I5 -> %5i
         r"^I(\d+)\.(\d+)$"i      => s"%0\1i",     # I5.5 -> %05i there can be mistake if \2>\1
-        r"^E(\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
-        r"^ES(\d*\.\d*)$"i => s"%\1E",            # ES7.2 -> %7.2E ???
-        r"^PE(\d*\.\d*)$"i => s"%\1E",            # E7.2 -> %7.2E Scientific format with Scale Factor P
-        r"^P1E(\d*\.\d*)$"i => s"%\1E",           # E7.2 -> %7.2E
-        r"^P2E(\d*\.\d*)$"i => s"%\1E%\1E",       # E7.2 -> %7.2E ??? is it right?
-        r"^P3E(\d*\.\d*)$"i => s"%\1E%\1E%\1E",   # E7.2 -> %7.2E
+        r"^[ED](\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
+        r"^[ED]S(\d*\.\d*)$"i => s"%\1E",            # ES7.2 -> %7.2E ???
+        r"^P[ED](\d*\.\d*)$"i => s"%\1E",            # E7.2 -> %7.2E Scientific format with Scale Factor P
+        r"^P1[ED](\d*\.\d*)$"i => s"%\1E",           # E7.2 -> %7.2E
+        r"^P2[ED](\d*\.\d*)$"i => s"%\1E%\1E",       # E7.2 -> %7.2E ??? is it right?
+        r"^P3[ED](\d*\.\d*)$"i => s"%\1E%\1E%\1E",   # E7.2 -> %7.2E
         r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
         r"^X$"i           => s" ",                # X -> ' '
         r"^T\d*$"i           => s" ",             # Tx -> ' ' : move to absolute position (column) x
@@ -1774,7 +1812,7 @@ function processcommon(code, commons, arrays)
     end
     lines = foldl((a,b) -> a*'\n'*b, lines)
     # Regex for 'END' of subroutine https://regex101.com/r/evx2Lu/4
-    rx = r"(\W)(\w+|)((?:\h*#[^\n]*|\h*)\n+)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#[^\n]*|\h*))$"mi
+    rx = r"(\h*\d+\h+|\h+)(\w+|)((?:\h*#[^\n]*|\h*)\n+)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#[^\n]*|\h*))$"mi
     vm = collect(eachmatch(rx, lines))
     if length(vm) == 0
         @info("something wrong")
@@ -1786,7 +1824,15 @@ function processcommon(code, commons, arrays)
     if lowercase(m.captures[2]) != "return"
         lines = replace(lines, rx => SubstitutionString("\\1\\2\\3" * packstr * "      ret_iZjAcpPokM\n" * "\\4"))
     else
-        lines = replace(lines, rx => SubstitutionString("\\1\n" * packstr * "      ret_iZjAcpPokM\\3\\4"))
+        if isempty(strip(m.captures[1])) # without label
+            lines = replace(lines, rx => SubstitutionString("\\1\n" * packstr * "      ret_iZjAcpPokM\\3\\4"))
+        else
+            label = strip(m.captures[1])
+            l = length(m.captures[1])
+            lines = replace(lines, rx =>
+                            SubstitutionString(' '^l * "at_iZjAcpPokMlabel L$(label)\n" *
+                                               ' '^l * lstrip(packstr) * "      ret_iZjAcpPokM\\3\\4"))
+        end
     end
     lines, comments = splitoncomment(lines)
 
@@ -1827,6 +1873,34 @@ function markcontinued(code, i)
         push!(marked, i+=1)
     end
     return marked
+end
+
+function processarithmif(code)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : code
+    # https://regex101.com/r/5R0qtY/1/
+    rx = r"\bif\b\h*(\(((?>[^\(\)]++|(?1))*)\))\h*(\d+)\h*,\h*(\d+)\h*,\h*(\d+)"i
+    for m in reverse(collect(eachmatch(rx, code1)))
+        line = m.match
+        str = "\n"
+        expr = m.captures[2]
+        L1, L2, L3 = m.captures[3:5]
+        if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
+            cond = expr
+        else
+            cond = @sprintf "CND%s" mod(hash("$(expr)"), 2^16)
+            str *= "      $cond = $expr\n"
+        end
+        str *= "      if $cond < 0\n" *
+               "        goto $L1\n" *
+               "      elseif $cond == 0\n" *
+               "        goto $L2\n" *
+               "      else\n" *
+               "        goto $L3\n" *
+               "      end\n      "
+        o = m.offset; l = ncodeunits(m.match)
+        code1 = code1[1:prevind(code1,o)] * str * code1[thisind(code1,o+l):end]
+    end
+    return code isa AbstractVector ? split(code1, '\n') : code1
 end
 
 function processselectcase(code)
@@ -2019,24 +2093,33 @@ function savespecialsymbols(code)
         end
         code = replace(code, m.match => str)
     end
-    # save '!' inside strings
+    # save '!', '"', '\\', '$' inside strings
     rx = r"('((?>[^'\n]*|(?1))*)')"m
     for m in reverse(collect(eachmatch(rx, code)))
-        str = replace(m.match, r"!" => "bang_iZjAcpPokM")
+        str = replace(m.match, r"!"    => "bang_iZjAcpPokM")
+        str = replace(str,     r"\""   => "quote_iZjAcpPokM")
+        str = replace(str,     r"[\\]" => "slashsymbol_iZjAcpPokM")
+        str = replace(str,     r"\$"   => "dollar_iZjAcpPokM")
         code = replace(code, m.match => str)
     end
-    # save '"' inside strings
-    rx = r"('((?>[^'\n]*|(?1))*)')"m
-    for m in reverse(collect(eachmatch(rx, code)))
-        str = replace(m.match, r"\"" => "quote_iZjAcpPokM")
-        code = replace(code, m.match => str)
-    end
-    # save '\\' inside strings
-    rx = r"('((?>[^'\n]*|(?1))*)')"m
-    for m in reverse(collect(eachmatch(rx, code)))
-        str = replace(m.match, r"[\\]" => "slashsymbol_iZjAcpPokM")
-        code = replace(code, m.match => str)
-    end
+    ## save '!' inside strings
+    #rx = r"('((?>[^'\n]*|(?1))*)')"m
+    #for m in reverse(collect(eachmatch(rx, code)))
+    #    str = replace(m.match, r"!" => "bang_iZjAcpPokM")
+    #    code = replace(code, m.match => str)
+    #end
+    ## save '"' inside strings
+    #rx = r"('((?>[^'\n]*|(?1))*)')"m
+    #for m in reverse(collect(eachmatch(rx, code)))
+    #    str = replace(m.match, r"\"" => "quote_iZjAcpPokM")
+    #    code = replace(code, m.match => str)
+    #end
+    ## save '\\' inside strings
+    #rx = r"('((?>[^'\n]*|(?1))*)')"m
+    #for m in reverse(collect(eachmatch(rx, code)))
+    #    str = replace(m.match, r"[\\]" => "slashsymbol_iZjAcpPokM")
+    #    code = replace(code, m.match => str)
+    #end
     code  = replace(code, r"#" => "sha_iZjAcpPokM")
     code  = replace(code, r"@" =>  "at_iZjAcpPokM")
     return code
@@ -2046,6 +2129,7 @@ function restorespecialsymbols(code)
     code = replace(code,        r"sha_iZjAcpPokM"  => "#")
     code = replace(code,         r"at_iZjAcpPokM"  => "@")
     code = replace(code,       r"bang_iZjAcpPokM"  => "!")
+    code = replace(code,       r"dollar_iZjAcpPokM"=> "\\\$")
     code = replace(code,      r"quote_iZjAcpPokM"  => "\\\"")
     code = replace(code,   r"GhUtwoap_iZjAcpPokM"  => "'")
     code = replace(code,    r"lastpos_iZjAcpPokM"  => "end")
@@ -2065,9 +2149,29 @@ const multilinereplacements = OrderedDict(
     r"^(\h*)(\d\d)(\h+)continue(.*)$"mi   => @s_str("  \\1\\3@label L\\2 \\4"),
     r"^(\h*)(\d\d\d)(\h+)continue(.*)$"mi => @s_str("   \\1\\3@label L\\2 \\4"),
     r"^(\h*)(\d+)(\h+)continue(.*)$"mi    => @s_str("    \\1\\3@label L\\2 \\4"),
-    # https://regex101.com/r/J5ViSG/1
-    r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n     \\3\\4"),
+    #### https://regex101.com/r/J5ViSG/1
+    ###r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n     \\3\\4"),
 )
+
+function shapinglabels(code)
+    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : code
+    if isfixedformfortran
+        #rx = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
+        rx = r"(?=^(((\h*)(\d+)(\h+))(\w+|)))(?!^.{5}\S)"m
+    else
+        rx = r"^(((\h+|)(\d+)(\h+))(\w+|))"m
+        #rx = r"^(\h+|)(\d+)(\h+)"m
+    end
+    for m in reverse(collect(eachmatch(rx, code1)))
+        label, tail = m.captures[4], m.captures[6]
+        o = m.offset; l = ncodeunits(m.captures[1])
+        head = ' '^ncodeunits(m.captures[2])
+        str = "$(head)at_iZjAcpPokMlabel L$label"
+        uppercase(tail) != "CONTINUE" && (str *= "\n$head$tail")
+        code1 = code1[1:prevind(code1,o)] * str * code1[thisind(code1,o+l):end]
+    end
+    return code isa AbstractVector ? split(code1, '\n') : code1
+end
 
 const singlewordreplacements = OrderedDict(
     #r"(\bif\b|\belseif\b|\bend\b|\bdo\b|\bwhile\b)"i => s"\L\1",
