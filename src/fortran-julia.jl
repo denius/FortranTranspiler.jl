@@ -216,13 +216,14 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = insertabsentreturn(code)
 
         code = processcommon(code, commons, arrays)
-        write("test2.jl", code)
+        #write("test2.jl", code)
 
         # comment out all vars declarations
         code, commentstrings = commentoutdeclarations(code, commentstrings)
-        write("test3.jl", code)
+        write("test2.jl", code)
 
         code = processdostatements(code)
+        write("test3.jl", code)
 
         code = replacedocontinue(code, dolabels, gotolabels)
 
@@ -443,7 +444,7 @@ stripcomments(code) = replace(code, r"[ ]*CMMNT\d{10}"m => "")
 #end
 
 function splitoncomment(code)
-    rx = r"(?=CMMNT\d{10})"
+    rx = r"(?=#?CMMNT\d{10})"
     #rx = r"\h*#.*$"
     lines = splitonlines(code)
     comments  = ["" for i=axes(lines,1)]
@@ -506,7 +507,10 @@ end
 #OrderStyle(::Type{<:Union{AbstractSet,AbstractDict}}) = UnorderedContainer()
 #OrderStyle(::Type{<:Any}) = NotContainer()
 
-tostring(code::AbstractVector) = foldl((a,b) -> a*'\n'*b, code)
+function tostring(code::AbstractVector)
+    replace(foldl((a,b) -> a*'\n'*b, code), r"\t?\n\t|\t\n\t?|\t?\r\t|\t\r\t?"=>"")
+end
+#tostring(code::AbstractVector) = foldl((a,b) -> a*'\n'*b, code)
 tostring(code::AbstractString) = code
 
 splitonlines(code::AbstractVector) = deepcopy(code)
@@ -717,31 +721,23 @@ function concatlines(line1, line2)
            replace(line2, r"^\t?(.*)$"m => s"\1")
 end
 
-function processdostatements(code)
-    lines = splitonlines(code)
-    rx = r"^(\h*\d*\h*|)do\h*(?:\d+\h*,?|)\h*[\w_]+\h*=.*$"i
+function processdostatements(code::AbstractString)
+    rx = r"^(\h*\d*\h*|\h*)do\h*(?:\d+\h*,?|)\h*[\w_]+\h*="mi
+    #rx = r"^(\h*\d*\h*|)do\h*(?:\d+\h*,?|)\h*[\w_]+\h*=.*$"i
     i = 1
-    while true
-        if occursin(rx, lines[i])
-            # cut out this line with all continuations
-            head = replace(lines[i], rx=>s"\1")
-            str = "" * lines[i]
-            while iscontinued(lines[i], i<length(lines) ? lines[i+1] : "")
-                splice!(lines, i)
-                str = concatlines(str,lines[i])
-            end
-            splice!(lines, i)
-            # replace with new julia's `for` statement
-            success,s1,lbl,var,ex1,ex2,ex3,com = parsedostatement(str)
+    for m in reverse(collect(eachmatch(rx, code)))
+        r = continuedlinesrange(code, m.offset)
+        success,s1,lbl,var,ex1,ex2,ex3,com = parsedostatement(code[r])
+        @show success,s1,lbl,var,ex1,ex2,ex3,com
+        if success
             length(lbl) > 0 && (lbl *= " ")
             length(ex3) > 0 && (ex3 *= ":")
-            success && (str = head * "for " * lbl * var * " = " * ex1 * ":" * ex3 * ex2 * com)
-            insert!(lines, i, str)
+            str = "$(m.captures[1])for $lbl$var = $ex1:$ex3$ex2$com\n"
+            #str = m.captures[1] * "for " * lbl * var * " = " * ex1 * ":" * ex3 * ex2 * com * '\n'
+            code = code[1:prevind(code,r[1])] * str * code[nextind(code,r[end]):end]
         end
-        i += 1
-        i > length(lines) && break
     end
-    return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
+    return code
 end
 
 function parsedostatement(line)
@@ -756,7 +752,7 @@ function parsedostatement(line)
 
     while true
         ttype = picktoken(line, pstn)
-        #print("_$ttype")
+        print("_$ttype")
         if ttype == 'e' || ttype == '#'
             break
         elseif ttype == ' '
@@ -792,10 +788,10 @@ function parsedostatement(line)
             end
             pstn = skiptoken(line, pstn)
             starts[nextarg+=1] = pstn
-        elseif ttype == '('
+        elseif ttype == '(' || ttype == '['
             inbraces += 1
             pstn = skiptoken(line, pstn)
-        elseif ttype == ')'
+        elseif ttype == ')' || ttype == ']'
             inbraces -= 1
             pstn = skiptoken(line, pstn)
         elseif ttype == ','
@@ -803,6 +799,10 @@ function parsedostatement(line)
             if inbraces == 0
                 starts[nextarg+=1] = pstn
             end
+        elseif ttype == 'l'
+                lex, pstn1 = taketoken(line, pstn)
+                occursin(r"CMMNT\d{10}", lex) && break
+                pstn = pstn1
         else
             pstn = skiptoken(line, pstn)
         end
@@ -819,18 +819,16 @@ function parsedostatement(line)
            strip(line[starts[1]:starts[2]-2]),
            strip(line[starts[2]:starts[3]-2]),
            strip(line[starts[3]:pstn-1]),
-           line[pstn:end]                   # trailing comment
+           rstrip(line[pstn:end])                   # trailing comment
 end
 
 function processifstatements(code)
-    code1 = code isa AbstractVector ? foldl((a,b) -> a*'\n'*b, code) : deepcopy(code)
 
-    rx = r"^(\h{0,4}\d*\h*|)(else|)\h*if\h*\(.*"mi
-    for (i,m) in enumerate(reverse(collect(eachmatch(rx, code1))))
+    rx = r"^(\h{0,4}\d*\h*|)(\h*else|)\h*if\h*\(.*"mi
+    for m in reverse(collect(eachmatch(rx, code)))
         o = m.offset
-        s1 = replace(m.match, rx => s"\1")
-        s2 = lowercase(replace(m.match, rx => s"\2"))
-        iflength, wothen, ifcond, ifexec, afterthencomment = parseifstatement(code1, o)
+        s1 = m.captures[1]; s2 = lowercase(m.captures[2])
+        iflength, wothen, ifcond, ifexec, afterthencomment = parseifstatement(code, o)
         length(ifexec) > 0 && isletter(ifexec[1]) && (ifexec = " " * ifexec)
         length(afterthencomment) > 0 && (afterthencomment = " " * afterthencomment)
         #@show o, iflength, ifcond, ifexec, afterthencomment
@@ -849,11 +847,10 @@ function processifstatements(code)
         else
             str = ""
         end
-        code1 = code1[1:prevind(code1,o)] * str * code1[thisind(code1,o+iflength):end]
+        code = code[1:prevind(code,o)] * str * code[thisind(code,o+iflength):end]
     end
 
-    code1 = replace(code1, r"if_iZjAcpPokM" => "if")
-    return code isa AbstractVector ? split(code1, '\n') : code1
+    return replace(code, r"if_iZjAcpPokM" => "if")
 end
 
 function parseifstatement(str, pstn)
@@ -1537,7 +1534,7 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
     end
 
     lines = map(*, lines, comments)
-    return code isa AbstractVector ? lines : foldl((a,b) -> a*'\n'*b, lines)
+    return sameasarg(code, lines)
 end
 
 """
@@ -1885,9 +1882,9 @@ function insertabsentreturn(code::AbstractString)
         code = replace(code, rx => SS("\\1$(mask("lastreturn"))\\3\\4"))
     else
         m = collect(eachmatch(r"(?<=\n|\r)(\h+|)end"mi, code))[end]
-        o = m.offset; l = ncodeunits(m.match)
-        code1 = code1[1:prevind(code1,o)] * ' '^m.captures[1] * "$(mask("lastreturn"))\n" *
-                code1[thisind(code1,o):end]
+        o = m.offset; l = ncodeunits(m.captures[1])
+        code = code[1:prevind(code,o)] * "$(' '^l)$(mask("lastreturn"))\n" *
+                code[thisind(code,o):end]
     end
     # mask all other `return`
     code = replace(code, Regex("\\breturn\\b") => SS("$(mask("return"))"))
@@ -2444,6 +2441,7 @@ const replacements = OrderedDict(
     r"(\b(?!elseif|if)[\w_]+\b)[\h]+\("i => s"\1(",
     # Implicit declaration
     r"^\h*implicit(.*)"mi => s"",
+    Regex("\\b$(mask("lastreturn"))\\b") => "return",
     # main program
     r"^(\h*)program\h*$"mi => s"\1PROGRAM NAMELESSPROGRAM",
     # rstrip()
