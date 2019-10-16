@@ -144,7 +144,9 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     # convert lines continuations marks to "\t\r\t"
     code = replacecontinuationmarks(code, isfixedformfortran)
 
+    write("test1.jl", code)
     code, formatstrings = collectformatstrings(code)
+    write("test2.jl", code)
     #println("formatstrings:"); printlines(formatstrings)
 
     alllines = splitonlines(code)
@@ -223,12 +225,12 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         lines, comments = splitoncomment(code)
 
-        write("test1.jl", tostring(lines))
+        #write("test1.jl", tostring(lines))
         # remains straight syntax conversions
         for rx in replacements
             lines = map(a->replace(a, rx), lines)
         end
-        write("test2.jl", tostring(lines))
+        #write("test2.jl", tostring(lines))
 
         # concat code lines back together and restore saved comments
         lines = map(*, lines, comments)
@@ -458,8 +460,9 @@ function replacecontinuationmarks(code::AbstractString, isfixedformfortran)
 end
 
 function collectformatstrings(code::AbstractString)
-    # https://regex101.com/r/uiP6Is/3
-    rx = r"('\(((?>[\s\S](?!'\(|\)')*|(?1))*?)\)')"mi
+    # https://regex101.com/r/uiP6Is/5
+    rx = r"('\(((?>(?!'\(|\)')*[^\n]|(?1))*?)\)')"mi
+    #rx = r"('\(((?>[\s\S](?!'\(|\)')*|(?1))*?)\)')"mi
     formatstrings = Dict{String,String}()
     for m in reverse(collect(eachmatch(rx, code)))
         str = replace(m.match, mask("''") => "''")
@@ -956,23 +959,23 @@ end
 
 function convertformat(formatstring)
     FMT = OrderedDict(
-        r"^\/$"           => "\\n",               # / -> START NEW RECORD
-        r"^(\d*)P$"i      => "",                  # Scale Factor (P): scale from/to mantissa
-        r"^A$"i           => s"%s",               # A -> %s
-        r"^A(\d*)$"i      => s"%\1s",             # A9 -> %9s
-        r"^I(\d*)$"i      => s"%\1i",             # I5 -> %5i
-        r"^I(\d+)\.(\d+)$"i      => s"%0\1i",     # I5.5 -> %05i there can be mistake if \2>\1
-        r"^[ED](\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
-        r"^[ED]S(\d*\.\d*)$"i => s"%\1E",            # ES7.2 -> %7.2E ???
-        r"^P[ED](\d*\.\d*)$"i => s"%\1E",            # E7.2 -> %7.2E Scientific format with Scale Factor P
+        r"^\/$"                => "\\n",             # / -> START NEW RECORD
+        r"^(\d*)P$"i           => "",                # Scale Factor (P): scale from/to mantissa
+        r"^A$"i                => s"%s",             # A -> %s
+        r"^A(\d*)$"i           => s"%\1s",           # A9 -> %9s
+        r"^I(\d*)$"i           => s"%\1i",           # I5 -> %5i
+        r"^I(\d+)\.(\d+)$"i    => s"%0\1i",          # I5.5 -> %05i there can be mistake if \2>\1
+        r"^[ED](\d*\.\d*)$"i   => s"%\1E",           # E7.2 -> %7.2E
+        r"^[ED]S(\d*\.\d*)$"i  => s"%\1E",           # ES7.2 -> %7.2E ???
+        r"^P[ED](\d*\.\d*)$"i  => s"%\1E",           # E7.2 -> %7.2E Scientific format with Scale Factor P
         r"^P1[ED](\d*\.\d*)$"i => s"%\1E",           # E7.2 -> %7.2E
         r"^P2[ED](\d*\.\d*)$"i => s"%\1E%\1E",       # E7.2 -> %7.2E ??? is it right?
         r"^P3[ED](\d*\.\d*)$"i => s"%\1E%\1E%\1E",   # E7.2 -> %7.2E
-        r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
-        r"^X$"i           => s" ",                # X -> ' '
-        r"^T\d*$"i           => s" ",             # Tx -> ' ' : move to absolute position (column) x
-        r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
-        r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
+        r"^F(\d*\.\d*)$"i      => s"%\1F",           # F7.2 -> %7.2F
+        r"^X$"i                => s" ",              # X -> ' '
+        r"^T\d*$"i             => s" ",              # Tx -> ' ' : move to absolute position (column) x
+        r"^([-]?\d+)P$"i       => s"",               # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
+        r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",      # unenclose ''
     )
     # split on tokens and apply repeats
     format = parseformat(formatstring)
@@ -987,8 +990,10 @@ end
 split format string on tokens and apply repeats
 """
 function parseformat(formatstring)
+    @show formatstring
     rep = r"^(\d+)(.*)$"
     formatparts = splitformat(formatstring)
+    @show formatparts
 
     format = Vector{String}(undef, 0)
     for (i,el) in enumerate(formatparts)
@@ -1010,10 +1015,10 @@ function parseformat(formatstring)
 end
 
 function insertabsentreturn(code::AbstractString)
-    # find last return if exist. https://regex101.com/r/evx2Lu/12
+    # find last return if exist. https://regex101.com/r/evx2Lu/13
     # else insert new one
-    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#?CMMNT\d+\s*|\s*)+)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#?CMMNT\d+\s*|\s*))$"mi
-    #rx = r"((?<=\n|\r)\h*+\d+\h+|(?<=\n|\r)\h*+)(return)((?:\h*+#?CMMNT\d+\s*+|\s*+)+)(\h*+end\h*+(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*+#?CMMNT\d+\s*+|\s*+))$"mi
+    # Note: make a possessive regex for "ERROR: LoadError: PCRE.exec error: match limit exceeded"
+    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#?CMMNT\d+\s*|\s*)++)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#?CMMNT\d+\s*|\s*))$"mi
     if (m = match(rx, code)) != nothing
         code = replace(code, rx => SS("\\1$(mask("lastreturn"))\\3\\4"))
     else
@@ -1070,7 +1075,7 @@ function processcommon(code::AbstractString, commons, arrays)
     end
 
     # replace each RETURN with "@goto Lreturn" and restore last return
-    code = replace(code, Regex("\\b$(mask("return"))\\b") => SS("$(mask('@'))goto Lreturn\\2"))
+    code = replace(code, Regex("\\b$(mask("return"))\\b") => SS("$(mask('@'))goto Lreturn"))
     code = replace(code, Regex("\\b$(mask("lastreturn"))\\b") => SS("$(mask("return"))"))
 
     return code
@@ -1806,7 +1811,8 @@ end
 
 
 function splitoncomment(code)
-    rx = r"(?=#?CMMNT\d{10})"
+    rx = r"(?:#?CMMNT\d{10})"
+    #rx = r"(?=#?CMMNT\d{10})"
     #rx = r"\h*#.*$"
     lines = splitonlines(code)
     comments  = ["" for i=axes(lines,1)]
@@ -2220,7 +2226,7 @@ existind(str, i)      = thisind(str, min(max(1,i), ncodeunits(str)))
 function skipwhitespaces(str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     eos() && return len+1
-    while !eos() && str[i] == ' '
+    while !eos() && (str[i] == ' ' || str[i] == '\t' || str[i] == '\r')
         i = nextind(str, i)
     end
     return i
