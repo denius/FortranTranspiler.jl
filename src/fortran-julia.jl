@@ -87,7 +87,7 @@ const usage =
 """
 
 function main(args)
-    args, fnames = parse_args(args)
+    args, fnames = parseargs(args)
     case = args["--uppercase"] ? uppercase :
            args["--lowercase"] ? lowercase : identity
 
@@ -112,36 +112,10 @@ end
 
 isfixedformfortran = true
 
-const SS = SubstitutionString
-
-function mask(smbl)
-    if smbl == '@' || smbl == "@"
-        return "at_iZjAcpPokM"
-    elseif smbl == '!' || smbl == "!"
-        return "bang_iZjAcpPokM"
-    elseif smbl == '$' || smbl == "\$"
-        return "dollar_iZjAcpPokM"
-    elseif smbl == '"' || smbl == "\""
-        return "quote_iZjAcpPokM"
-    elseif smbl == '#' || smbl == "#"
-        return "sha_iZjAcpPokM"
-    elseif smbl == '\\' || smbl == "\\"
-        return "slashsymbol_iZjAcpPokM"
-    elseif smbl == "''"
-        return "GhUtwoap_iZjAcpPokM"
-    elseif smbl == "end"
-        return "lastpos_iZjAcpPokM"
-    elseif smbl == "return"
-        return "ret_iZjAcpPokM"
-    else
-        return smbl * "_iZjAcpPokM"
-    end
-end
-
 function convertfromfortran(code; casetransform=identity, quiet=true,
                             verbose=false, veryverbose=false)
 
-    # ORDER OF FUNCTIONS IS MATTER
+    # ORDER OF PROCESSING IS MATTER
 
     # should be '\n' newlines only
     for rx in (r"\r\n" => @s_str("\n"), r"\r" => @s_str("\n"))
@@ -166,14 +140,12 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
     commentstrings = OrderedDict{String,String}()
     code, commentstrings = savecomments(code, commentstrings, casetransform)
-    #write("test-1.jl", code)
 
     # convert lines continuations marks to "\t\r\t"
     code = replacecontinuationmarks(code, isfixedformfortran)
 
     code, formatstrings = collectformatstrings(code)
     #println("formatstrings:"); printlines(formatstrings)
-    write("test0.jl", code)
 
     alllines = splitonlines(code)
 
@@ -186,12 +158,12 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     for i = 1:length(subs)-1
 
         code = foldl((a,b) -> a*'\n'*b, view(alllines, subs[i]:subs[i+1]-1))
+
         veryverbose && println()
         verbose && print("[$(subs[i]):$(subs[i+1]-1)] $(strip(subnames[i]))\n")
 
-        # all collectXXX routines works on concatenated lines thus prepare it
+        # extract necessary information
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
-
         scalars, arrays = collectvars(lines)
         commons = collectcommon(lines)
         dolabels, gotolabels = collectlabels(lines)
@@ -205,7 +177,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         # replace array's brackets with square braces
         code = replacearraysbrackets(code, arrays)
 
-        #code = restorespecialsymbols(code)
+        # READ and WRITE statements
         code, formats = processiostatements(code, formats, formatstrings)
         veryverbose && length(formats) > 0 && println("    FORMATs : $formats")
 
@@ -213,34 +185,27 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         #write("test1.jl", code)
         code = insertabsentreturn(code)
-
-        code = processcommon(code, commons, arrays)
         #write("test2.jl", code)
 
+        code = processcommon(code, commons, arrays)
+
         # comment out all vars declarations
-        #write("test1.jl", code)
         code, commentstrings = commentoutdeclarations(code, commentstrings)
-        write("test1.jl", code)
 
         code = processdostatements(code)
 
         code = replacedocontinue(code, dolabels, gotolabels)
 
-        #write("test1.jl", code)
         code = processconditionalgotos(code)
-        #write("test2.jl", code)
 
         code = processifstatements(code)
         code = processarithmif(code)
 
         code = shapinglabels(code)
-        #write("test3.jl", code)
 
-        #write("test1.jl", code)
         # process replacements
         #code = foldl(replace, collect(multilinereplacements), init=code)
         code = foldl(replace, collect(singlewordreplacements), init=code)
-        #write("test2.jl", code)
 
         code = processimplieddoloops(code)
 
@@ -248,34 +213,32 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code = processparameters(code)
 
-        #write("test3.jl", code)
         code = processdatastatement(code, vcat(arrays, "view"))
-        write("test1.jl", code)
 
         code = splatprintviews(code)
 
+        #write("test1.jl", code)
         code = processlinescontinuation(code)
-        write("test2.jl", code)
+        #write("test2.jl", code)
 
         lines, comments = splitoncomment(code)
 
-        # straight syntax conversions
+        write("test1.jl", tostring(lines))
+        # remains straight syntax conversions
         for rx in replacements
             lines = map(a->replace(a, rx), lines)
         end
-        #write("test2.jl", foldl((a,b) -> a*'\n'*b, lines))
+        write("test2.jl", tostring(lines))
+
+        # concat code lines back together and restore saved comments
+        lines = map(*, lines, comments)
+        code = tostring(lines)
 
         # strip all whitespaces inside brackets due to
         # https://github.com/JuliaLang/julia/issues/14853
-        lines = stripwhitesinbrackets(lines)
+        code = stripwhitesinbrackets(code)
 
-        # concat code lines back together and restore comments
-        lines = map(*, lines, comments)
-        code = tostring(lines)
-        write("test3.jl", code)
-        #printlines(commentstrings)
         code = restorecomments(code, commentstrings)
-        #code = foldl(replace, collect(commentstrings), init=code)
 
         # removing unnecessaries
         for rx in removal
@@ -290,7 +253,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         # restore saved strings and symbols
         code = foldl(replace, reverse(collect(strings)), init=code)
         code = restorespecialsymbols(code)
-        code = replace(code, r"\t?\n\t|\t\n\t?|\t?\r\t|\t\r\t?" => "\n")
+        code = replace(code, r"\t?(\n|\r)\t|\t(\n|\r)\t?" => "\n")
 
         try
             Meta.parse(code, 1)
@@ -306,7 +269,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     return result
 end
 
-function parse_args(lines)
+function parseargs(lines)
     function therecanbeonlyone!(args, v1, v2)
         args[v1] = args[v1] || args[v2]
         delete!(args, v2)
@@ -371,6 +334,100 @@ function parse_args(lines)
     return args, fnames
 end
 
+const SS = SubstitutionString
+
+function mask(smbl)
+    if smbl == '@' || smbl == "@"
+        return "at_iZjAcpPokM"
+    elseif smbl == '!' || smbl == "!"
+        return "bang_iZjAcpPokM"
+    elseif smbl == '$' || smbl == "\$"
+        return "dollar_iZjAcpPokM"
+    elseif smbl == '"' || smbl == "\""
+        return "quote_iZjAcpPokM"
+    elseif smbl == '#' || smbl == "#"
+        return "sha_iZjAcpPokM"
+    elseif smbl == '\\' || smbl == "\\"
+        return "slashsymbol_iZjAcpPokM"
+    elseif smbl == "''"
+        return "GhUtwoap_iZjAcpPokM"
+    elseif smbl == "end"
+        return "lastpos_iZjAcpPokM"
+    elseif smbl == "return"
+        return "ret_iZjAcpPokM"
+    else
+        return smbl * "_iZjAcpPokM"
+    end
+end
+
+function savespecialsymbols(code::AbstractString)
+    # save '#', '@', '!', "''"
+    # https://regex101.com/r/YrkC9C/1
+    rx = r"('((?>[^']*|(?1))*)'){2,}"m
+    #rx = r"('((?>[^'\n]*|(?1))*)'){2,}"m
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = m.match
+        len = ncodeunits(code)
+        while true
+            str = replace(str, r"('((?>[^']*|(?1))*)')('((?>[^']*|(?1))*)')" => SS("'\\2$(mask("''"))\\4'"))
+            #str = replace(str, r"('((?>[^']*|(?1))*)')('((?>[^']*|(?1))*)')" => s"'\2GhUtwoap_iZjAcpPokM\4'")
+            #str = replace(str, r"('((?>[^'\n]*|(?1))*)')('((?>[^'\n]*|(?1))*)')" => s"'\2GhUtwoap_iZjAcpPokM\4'")
+            len == (len = ncodeunits(str)) && break
+        end
+        code = replace(code, m.match => str)
+    end
+    # save '!', '"', '\\', '$' inside strings
+    rx = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = replace(m.match, r"!"    => mask('!'))
+        str = replace(str,     r"\""   => mask('"'))
+        str = replace(str,     r"[\\]" => mask('\\'))
+        str = replace(str,     r"\$"   => mask('$'))
+        code = replace(code, m.match => str)
+    end
+    code  = replace(code, r"#" => mask('#'))
+    code  = replace(code, r"@" => mask('@'))
+    return code
+end
+function restorespecialsymbols(code::AbstractString)
+    # restore saved symbols
+    code = replace(code, mask('#')   => "#"    )
+    code = replace(code, mask('@')   => "@"    )
+    code = replace(code, mask('!')   => "!"    )
+    code = replace(code, mask('$')   => "\\\$" )
+    code = replace(code, mask('"')   => "\\\"" )
+    code = replace(code, mask("''")  => "'"    )
+    code = replace(code, mask("end") => "end"  )
+    code = replace(code, mask('\\')  => "\\\\" )
+    return code
+end
+
+function savecomments(code, commentstrings, casetransform=identity)
+
+    rx = r"[ ]*#(?!CMMNT\d{10}).*(?:\t|)$" # spaces go to comments
+    lines = splitonlines(code)
+
+    for i in axes(lines,1)
+        if (m = match(rx, lines[i])) != nothing
+            str = m.match
+            key = @sprintf "CMMNT%05d%05d" i mod(hash(str), 2^16)
+            commentstrings[key] = String(str)
+            # case conversion while comments are detached
+            lines[i] = casetransform(replace(lines[i], m.match => s"")) * " #$key"
+        else
+            # cut out all whitespaces not masked by the comments
+            lines[i] = casetransform(replace(lines[i], r"[ ]*(\t|)$" => s"\1"))
+        end
+    end
+    return sameasarg(code, lines), commentstrings
+end
+function restorecomments(code, commentstrings)
+    for (k,v) in commentstrings
+        code = replace(code, Regex("[ ]?#?$k") => v)
+    end
+    return code
+end
+
 """
 Convert lines continuations marks to "\t\r\t"
 """
@@ -398,6 +455,31 @@ function replacecontinuationmarks(code::AbstractString, isfixedformfortran)
         end
     end
     return code
+end
+
+function collectformatstrings(code::AbstractString)
+    # https://regex101.com/r/uiP6Is/3
+    rx = r"('\(((?>[\s\S](?!'\(|\)')*|(?1))*?)\)')"mi
+    formatstrings = Dict{String,String}()
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = replace(m.match, mask("''") => "''")
+        key = @sprintf "FMT%06d" mod(hash(str), 2^19)
+        formatstrings[key] = str
+        code = replace(code, m.match => key)
+    end
+    return code, formatstrings
+end
+
+function collectformats(lines::AbstractVector)
+    # https://regex101.com/r/Lopg3O/1
+    rx = r"^\h*(\d+)\h+format\h*(\(((?>[^\(\)]++|(?2))*)\))"i
+    formats = Dict{String,String}()
+    for i in axes(lines,1)
+        if (m = match(rx, lines[i])) != nothing
+            formats[m.captures[1]] = m.captures[3]
+        end
+    end
+    return formats
 end
 
 function markbysubroutine(code)
@@ -433,130 +515,12 @@ function markbysubroutine(code)
     return marked, names
 end
 
-
 function convertfortrancomments(code)
     rx = r"(^[cC*]|!)([^\n]*)"m
     code1 = tostring(code)
     code1 = replace(code1, rx => s"#\2")
     code1 = replace(code1, r"#=" => "# ") # accident multiline comment
     return sameasarg(code, code1)
-end
-
-stripcomments(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?CMMNT\d{10}"m => "")
-stripcommentsbutlast(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?CMMNT\d{10}(?!\t?$)"m => "")
-
-function splitoncomment(code)
-    rx = r"(?=#?CMMNT\d{10})"
-    #rx = r"\h*#.*$"
-    lines = splitonlines(code)
-    comments  = ["" for i=axes(lines,1)]
-    for i in axes(lines,1)
-        (m = match(rx, lines[i])) != nothing && (comments[i] = m.match)
-        lines[i] = replace(lines[i], rx => s"")
-    end
-    # cut out all whitespaces not masked by the comments
-    lines = map(a->replace(a, r"[ ]*(\t|)$" => s"\1"), lines)
-    return lines, comments
-end
-
-function processlinescontinuation(code::AbstractString)
-    # fix absent tabs
-    code = replace(code, r"\t?(\n|\r)\t|\t(\n|\r)\t?" => SS("\t\r\t"))
-    #code = replace(code, r"\t?\n\t|\t\n\t?|\t?\r\t|\t\r\t?" => SS("\t\r\t"))
-    # move arithmetic operator from start of continuator to tail of previous line
-    rx = r"(\h*)(#?CMMNT\d{10}|)\t\r\t(\h*|)(//|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)"
-    code = replace(code, rx => SS("\\1\\2\\4\t\r\t\\3"))
-    return code
-end
-
-function concatcontinuedlines(code)
-    # may be try `args...`
-    # Note: trailing comments are not allowed here
-    return code isa AbstractVector ? map(a->replace(a, r"\t(\n|\r)\t?|\t?(\n|\r)\t"=>"\t\t"), code) :
-                                     replace(code, r"\t(\n|\r)\t?|\t?(\n|\r)\t"=>"\t\t")
-end
-
-# trying to make trait. Verdict: too verbose
-#abstract type ContainerStyle end
-#struct OrderedContainer <: ContainerStyle end
-#struct UnorderedContainer <: ContainerStyle end
-#struct NotContainer <: ContainerStyle end
-#OrderStyle(instance) = OrderStyle(typeof(instance))
-#OrderStyle(::Type{<:Union{AbstractVector,OrderedDict,OrderedSet}}) = OrderedContainer()
-#OrderStyle(::Type{<:Union{AbstractSet,AbstractDict}}) = UnorderedContainer()
-#OrderStyle(::Type{<:Any}) = NotContainer()
-
-tostring(code::AbstractVector) =
-    replace(foldl((a,b) -> a*'\n'*b, code),
-            r"\t?(\n|\r)\t|\t(\n|\r)\t?" => "\t\r\t")
-tostring(code::AbstractString) = code
-
-splitonlines(code::AbstractVector) = deepcopy(code)
-splitonlines(code) = split(code, r"\n|\r")
-
-sameasarg(like::AbstractString, code::AbstractString)  = code
-sameasarg(like::AbstractVector, lines::AbstractVector) = lines
-sameasarg(like::AbstractVector, code::AbstractString)  = splitonlines(code)
-sameasarg(like::AbstractString, lines::AbstractVector) = tostring(lines)
-
-function printlines(lines)
-    println()
-    #for l in lines println(l) end
-    for (i,l) in enumerate(lines) print("[$i]: \"$l\"\n") end
-end
-
-function commentoutdeclarations(code, commentstrings)
-
-    patterns = [
-        # Match declarations
-        r"^\h*common\h*\/\h*\w+\h*\/\h*"mi,
-        r"^\h*dimension\h+"mi,
-        r"^\h*implicit\h*\w+"mi,
-        r"^\h*real(?!.*parameter).*::"mi, # https://regex101.com/r/7YxbnB/1
-        r"^\h*real\h*$"mi,
-        r"^\h*real\h+(?!.*function)"mi, # https://regex101.com/r/CFiiOx/1
-        r"^\h*real\*[0-9]+\h+(?!.*function)"mi,
-        r"^\h*double\h*precision(?!.*parameter).*::"mi,
-        r"^\h*double\h*precision\h*$"mi,
-        r"^\h*double\h*precision\h+(?!.*function)"mi,
-        r"^\h*complex(?!.*parameter).*::"mi,
-        r"^\h*complex\h*$"mi,
-        r"^\h*complex\h+(?!.*function)"mi,
-        r"^\h*complex\*[0-9]+\h+(?!.*function)"mi,
-        r"^\h*integer(?!.*parameter).*::"mi,
-        r"^\h*integer\h*$"mi,
-        r"^\h*integer\h+(?!.*function)"mi,
-        r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
-        r"^\h*integer\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
-        r"^\h*character(?!.*parameter).*::"mi,
-        r"^\h*character\h*$"mi,
-        r"^\h*character\h+(?!.*function)"mi,
-        r"^\h*character\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
-        r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
-        r"^\h*character\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
-        r"^\h*character\*\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
-        r"^\h*character\*\h*\([\h\w_*+-]+\)\h*(?!.*function)"mi,
-        r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
-        r"^\h*external\h+"mi,
-        r"^\h*logical(?!.*parameter).*::"mi,
-        r"^\h*logical\h*$"mi,
-        r"^\h*logical\h+(?!.*function)"mi,
-        r"^\h*allocatable\h+"mi,
-        r"^\h*entry\h+.*"mi,
-        r"^\h*save\h+.*"mi,
-        r"^\h*equivalence\h+.*"mi,
-        r"^\h+\d+\h+format\h*\("mi
-    ]
-
-    for rx in patterns
-        for m in reverse(collect(eachmatch(rx, code)))
-            r = continuedlinesrange(code, m.offset)
-            str = '#' * replace(code[r], r"(\r\t|\n\t)"m => SS("\\1#"))
-            code = code[1:prevind(code,r[1])] * str * code[nextind(code,r[end]):end]
-        end
-    end
-
-    return savecomments(code, commentstrings, identity)
 end
 
 function collectvars(lines::AbstractVector)
@@ -690,12 +654,479 @@ function collectlabels(lines::AbstractVector)
     return dolabels, gotolabels
 end
 
-iscontinued(line1, line2) = occursin(r"\t$", line1) || occursin(r"^\t", line2)
+"""
+replace array's braces with square brackets
+"""
+function replacearraysbrackets(code::AbstractString, arrays)
 
-function concatlines(line1, line2)
-    # comments will be stripped
-    return replace(line1, r"^(.*)(?:#?CMMNT\d{10}|)\t?$"m => s"\1") *
-           replace(line2, r"^\t?(.*)$"m => s"\1")
+    # remove whitespace between array name and left brace
+    for a in arrays
+        rx = Regex("(\\b$(a)\\b)\\h+\\(","i")
+        code = replace(code, rx => s"\1(")
+    end
+
+    # lookup "ARRAYNAME(" and replace
+    braces = r"\(((?>[^()]|(?R))*)\)" # complementary braces
+    #braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
+    brackets = s"[\1]"
+    for a in arrays
+        rx = Regex("\\b$(a)\\b\\(","i")
+        for m in collect(eachmatch(rx, code))
+            o = m.offset
+            code = code[1:prevind(code,o+ncodeunits(a))] *
+                   replace(code[thisind(code,o+ncodeunits(a)):end], braces => brackets, count=1)
+            #code = code[1:prevind(code,o)] * replace(code[o:end], braces => brackets, count=1)
+        end
+    end
+
+    # catch second braces, for arrays of strings, https://regex101.com/r/2WIc50/1
+    rx = r"(\[((?>[^\[\]]++|(?1))*)\])\h*(\(((?>[^\(\)]++|(?1))*)\))"
+    code = replace(code, rx => s"\1[\4]")
+
+    # fix uncompleted ranges in square braces like [1:] and [:1]
+    brackets = r"\[((?>[^\[\]]++|(?0))*)\]" # complementary brackets
+    #brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
+    # trim spaces around ':'
+    rx = r"\[(.*|)([ ]+|):([ ]+|)(.*|)\]"
+    for m in reverse(collect(eachmatch(brackets, code)))
+        if occursin(rx, m.match)
+            o = m.offset
+            code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
+        end
+    end
+    # uppend with "end"
+    rx = r"\[(.*[^,]):(,.*|)\]"
+    for m in reverse(collect(eachmatch(brackets, code)))
+        if occursin(rx, m.match)
+            o = m.offset
+            code = code[1:o-1] * replace(m.match, rx => s"[\1:lastpos_iZjAcpPokM\2]") *
+                   code[o+length(m.match):end]
+        end
+    end
+    # prepend with '1'
+    rx = r"\[:([^,].*)\]"
+    for m in reverse(collect(eachmatch(brackets, code)))
+        if occursin(rx, m.match)
+            o = m.offset
+            code = code[1:o-1] * replace(m.match, rx => s"[1:\1]") * code[o+length(m.match):end]
+        end
+    end
+    return code
+end
+
+function stripwhitesinbrackets(code::AbstractString)
+    brackets = r"\[((?>[^\[\]]++|(?0))*)\]" # complementary brackets
+    #brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
+    # trim spaces inside
+    for m in reverse(collect(eachmatch(brackets, code)))
+        o = m.offset
+        code = code[1:prevind(code,o)] *
+               replace(m.match, " " => "") *
+               code[thisind(code,o+ncodeunits(m.match)):end]
+    end
+    return code
+end
+
+"""
+save and replace all strings with its keys
+"""
+function saveallstrings(code::AbstractString)
+
+    # save escaped "\""
+    #code = replace(code, r"[\\][\"]" => "quote_iZjAcpPokM") # who did that?
+
+    strings = OrderedDict{String, String}()
+
+    # replace 'strings' with "strings" in code
+    rxstr = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rxstr, code)))
+        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
+        if length(m.captures[1]) > 3 || length(m.captures[1]) == 2
+            strings[key] = '"' * m.captures[2] * '"'
+            code = replace(code, m.match => key)
+        else # 'X' -- some symbol
+            strings[key] = m.captures[1]
+            code = replace(code, m.match => key)
+        end
+    end
+    rxstr = r"(\"((?>[^\"\n]*|(?1))*)\")"m
+    for m in reverse(collect(eachmatch(rxstr, code)))
+        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
+        strings[key] = m.captures[1]
+        code = replace(code, m.match => key)
+    end
+
+    # save empty strings ''
+    key = @sprintf "STR%siZjAcpPokM" mod(hash("\"\""), 2^20)
+    strings[key] = "\"\""
+    code = replace(code, mask("''") => key)
+
+    return code, strings
+end
+
+function restoreallstrings(code, strings)
+    return foldl(replace, reverse(collect(strings)), init=code)
+end
+
+function processiostatements(code::AbstractString, formats, formatstrings)
+    rxhead = r"(\bread\b|\bwrite\b)\h*\("mi
+    rxargs = r"^((?:.*[\n])*.*?)(\h*#[^\n]*)"m  # https://regex101.com/r/PqvHQD/1
+    for (i,m) in enumerate(reverse(collect(eachmatch(rxhead, code))))
+        o = m.offset
+        readwrite = lowercase(replace(m.match, rxhead => s"\1"))
+        iolength, io, label, fmt, pmt, paramsstr, args = parsereadwrite(code, o)
+        # FIXME: absent format
+        #@show iolength, io, label, fmt, pmt, paramsstr, args
+        # if it is possible then convert else delay convert call
+        if length(label) > 0 && haskey(formats, label)
+            fmt = formats[label]
+        elseif length(label) > 0 && haskey(formatstrings, label)
+            fmt = replace(formatstrings[label], r"^'\((.*)\)'$" => s"\1")
+            #FIXME: fmt = unescapeformatstring(formatstrings[label])
+        elseif length(label) > 0
+            @error("delayed format conversion call with $label")
+        else
+            formats["FMT$(m.offset)"] = fmt
+        end
+        fmt = convertformat(fmt)
+        if  readwrite == "read" && (io == "5" || io == "*")
+            io = "stdin"
+        elseif  readwrite == "write" && (io == "6" || io == "*")
+            io = "stdout"
+        end
+        args = occursin(rxargs, args) ? replace(args, rxargs=>s"\1)\2") : rstrip(args)*')'
+        str  =  readwrite == "read" ? "READ(" :
+                fmt       == ""    ? "println(" : "$(mask('@'))printf("
+        if str == "$(mask('@'))printf("
+            fmt = occursin(r"\$$", fmt) ? replace(fmt, @r_str("\\\$\$") => "") : fmt*"\\n"
+        end
+
+        #length(fmt) > 0 && @show fmt
+        fmt != "" && (fmt = "\"$fmt\", " )
+        str *= io * ", " * fmt * args
+        code = code[1:prevind(code,o)] * str * code[thisind(code,o+iolength):end]
+    end
+    return code, formats
+end
+
+function parsereadwrite(str, pstn)
+    pstn0 = pstn
+    label = fmt = IU = formatvar = ""
+    params = Dict{String,String}()
+    cmdtaken = false
+    inparams = false
+    nextparam = 1
+    startsparam = Int[]
+    endsparam = Int[]
+    startargs = 0
+    endargs = -1
+    inbraces  = 0
+
+    while true
+        ttype = picktoken(str, pstn)
+        #print("_$ttype")
+        if ttype == 'e' || ttype == '\n'
+            break
+        elseif ttype == ' '
+            pstn = skipspaces(str, pstn)
+        elseif !cmdtaken && ttype == 'l'
+            lex, pstn = taketoken(str, pstn)
+            if lowercase(lex) == "read" || lowercase(lex) == "write"
+                cmdtaken = true
+                pstn = skipspaces(str, pstn)
+            else
+                # that is not an 'READ/WRITE' statement
+                return 0, "", "", "", "", "", "", ""
+            end
+        elseif cmdtaken && inparams && ttype == 'l'
+            lex, pstn = taketoken(str, pstn)
+            LEX = uppercase(lex)
+            if LEX == "FMT" && picktoken(str, skipspaces(str, pstn)) == '='
+                label, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
+            elseif (LEX == "ERR" || LEX == "END") && picktoken(str, skipspaces(str, pstn)) == '='
+                val, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
+                params[uppercase(lex)] = val
+            elseif nextparam == 1
+                IU = lex
+            else
+                # this is the format string in variable (or just saved)
+                formatvar = lex
+                occursin(r"^FMT\d{6}$", lex) ||
+                @warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
+                      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, pstn)]))\"\n")
+            end
+        elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
+            IU, pstn = taketoken(str, pstn)
+        elseif cmdtaken && inparams && ttype == 'd'
+            label, pstn = taketoken(str, pstn)
+        elseif cmdtaken && inparams && ttype == '*' && nextparam == 1
+            IU, pstn = taketoken(str, pstn)
+        elseif cmdtaken && inparams && ttype == ''' || ttype == '*'
+            fmt, pstn = taketoken(str, pstn)
+            fmt = concatcontinuedlines(fmt)
+            fmt = replace(fmt, mask("''") => "'")
+        elseif ttype == '('
+            inbraces += 1
+            pstn = skiptoken(str, pstn)
+            if length(startsparam) == 0
+                push!(startsparam, pstn)
+                inparams = true
+            end
+        elseif ttype == ')'
+            inbraces -= 1
+            if inbraces == 0 && inparams
+                push!(endsparam, prevind(str, pstn))
+                startargs = nextind(str, pstn)
+                inparams = false
+                endargs = pstn = skipupto('\n', str, pstn)
+                endargs = prevind(str, endargs)
+                break
+            end
+            pstn = skiptoken(str, pstn)
+        elseif ttype == ',' && inparams && inbraces == 1
+            push!(endsparam, prevind(str, pstn))
+            pstn = skiptoken(str, pstn)
+            push!(startsparam, thisind(str, pstn))
+            nextparam += 1
+        else
+            pstn = skiptoken(str, pstn)
+        end
+    end
+
+    IU = strip(str[startsparam[1]:endsparam[1]])
+
+    label == "" && (label = formatvar)
+
+    if fmt == "*"
+        fmt = ""
+    else
+        fmt = replace(fmt, r"^\((.*)\)$"=>s"\1") # it is unenclose "()"
+    end
+    fmt = foldl((a,b) -> a*','*b, map(strip, split(fmt, ",")))
+
+    return ncodeunits(str[pstn0:prevind(str,pstn)]), IU, label, fmt, params,
+           str[startsparam[1]:endsparam[end]], str[startargs:endargs]
+end
+
+function splitformat(str)
+    pstn = 1
+    lexemstarts = Int[1]
+    lexemends = Int[]
+    inbraces  = 0
+
+    while true
+        ttype = picktoken(str, pstn)
+        #print("_$ttype")
+        if ttype == 'e' || ttype == '\n'
+            break
+        elseif ttype == ' '
+            pstn = skipwhitespaces(str, pstn)
+        elseif ttype == ',' && inbraces == 0
+            push!(lexemends, prevind(str, pstn))
+            pstn = skiptoken(str, pstn)
+            push!(lexemstarts, thisind(str, pstn))
+        elseif ttype == '/' && inbraces == 0
+            if pstn > lexemstarts[end]
+                push!(lexemends, prevind(str, pstn))
+                push!(lexemstarts, thisind(str, pstn))
+            end
+            push!(lexemends, thisind(str, pstn))
+            pstn = skiptoken(str, pstn)
+            push!(lexemstarts, thisind(str, pstn))
+        elseif ttype == '('
+            inbraces += 1
+            pstn = skiptoken(str, pstn)
+        elseif ttype == ')'
+            inbraces -= 1
+            pstn = skiptoken(str, pstn)
+        else
+            pstn = skiptoken(str, pstn)
+        end
+    end
+    push!(lexemends, ncodeunits(str))
+    @assert length(lexemstarts) == length(lexemends)
+
+    fmt = String[]
+    for (i,j) in zip(lexemstarts, lexemends)
+        push!(fmt, strip(str[i:j]))
+    end
+
+    return fmt
+end
+
+function convertformat(formatstring)
+    FMT = OrderedDict(
+        r"^\/$"           => "\\n",               # / -> START NEW RECORD
+        r"^(\d*)P$"i      => "",                  # Scale Factor (P): scale from/to mantissa
+        r"^A$"i           => s"%s",               # A -> %s
+        r"^A(\d*)$"i      => s"%\1s",             # A9 -> %9s
+        r"^I(\d*)$"i      => s"%\1i",             # I5 -> %5i
+        r"^I(\d+)\.(\d+)$"i      => s"%0\1i",     # I5.5 -> %05i there can be mistake if \2>\1
+        r"^[ED](\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
+        r"^[ED]S(\d*\.\d*)$"i => s"%\1E",            # ES7.2 -> %7.2E ???
+        r"^P[ED](\d*\.\d*)$"i => s"%\1E",            # E7.2 -> %7.2E Scientific format with Scale Factor P
+        r"^P1[ED](\d*\.\d*)$"i => s"%\1E",           # E7.2 -> %7.2E
+        r"^P2[ED](\d*\.\d*)$"i => s"%\1E%\1E",       # E7.2 -> %7.2E ??? is it right?
+        r"^P3[ED](\d*\.\d*)$"i => s"%\1E%\1E%\1E",   # E7.2 -> %7.2E
+        r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
+        r"^X$"i           => s" ",                # X -> ' '
+        r"^T\d*$"i           => s" ",             # Tx -> ' ' : move to absolute position (column) x
+        r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
+        r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
+    )
+    # split on tokens and apply repeats
+    format = parseformat(formatstring)
+    # converting
+    for rs in FMT
+        format = map( a->replace(a, rs), format)
+    end
+    return foldl(*, format)
+end
+
+"""
+split format string on tokens and apply repeats
+"""
+function parseformat(formatstring)
+    rep = r"^(\d+)(.*)$"
+    formatparts = splitformat(formatstring)
+
+    format = Vector{String}(undef, 0)
+    for (i,el) in enumerate(formatparts)
+        if occursin(rep, el)
+            num = parse(Int, replace(el, rep=>s"\1"))
+            str = replace(el, rep => s"\2")
+            if occursin(r"\(.*\)", str)
+                str = replace(str,  r"\((.*)\)"=> s"\1")
+                fmt = parseformat(str)
+                [append!(format, fmt) for j=1:num]
+            else
+                [push!(format, str) for j=1:num]
+            end
+        else
+            push!(format, el)
+        end
+    end
+    return format
+end
+
+function insertabsentreturn(code::AbstractString)
+    # find last return if exist. https://regex101.com/r/evx2Lu/12
+    # else insert new one
+    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#?CMMNT\d+\s*|\s*)+)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#?CMMNT\d+\s*|\s*))$"mi
+    #rx = r"((?<=\n|\r)\h*+\d+\h+|(?<=\n|\r)\h*+)(return)((?:\h*+#?CMMNT\d+\s*+|\s*+)+)(\h*+end\h*+(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*+#?CMMNT\d+\s*+|\s*+))$"mi
+    if (m = match(rx, code)) != nothing
+        code = replace(code, rx => SS("\\1$(mask("lastreturn"))\\3\\4"))
+    else
+        m = collect(eachmatch(r"(?<=\n|\r)(\h+|)end"mi, code))[end]
+        o = m.offset; l = ncodeunits(m.captures[1])
+        code = code[1:prevind(code,o)] * "$(' '^l)$(mask("lastreturn"))\n" *
+                code[thisind(code,o):end]
+    end
+    # mask all other `return`
+    code = replace(code, r"\breturn\b"i => SS("$(mask("return"))"))
+    return code
+end
+
+function processcommon(code::AbstractString, commons, arrays)
+    if length(commons) == 0
+        #code = replace(code, Regex("\\b$(mask("lastreturn"))\\b") => SS("$(mask("return"))"))
+        return code
+    end
+    #lines = splitonlines(code)
+
+    # @unpack COMMONs before use
+    rx = r"^([ ]*)common\h*\/\h*(\w+)\h*\/\h*"mi
+    for m in reverse(collect(eachmatch(rx, code)))
+        if haskey(commons, m.captures[2])
+            c1 = m.captures[1]; c2 = m.captures[2]
+            s = SS("$(c1)global $c2\n$c1$(mask('@'))unpack $(commons[c2]) = $c2\n$(m.match)")
+            code = replace(code, m.match => s)
+        end
+    end
+
+    # @pack! 'COMMON's back before return
+    packstr = "      $(mask('@'))label Lreturn\n"
+    for k in keys(commons)
+        # arrays don't needed because they should not be reallocated
+        v = split(commons[k], ',')
+        v = v[findall(a->lowercase(a) ∉ map(lowercase,arrays), v)]
+        if length(v) > 0
+            v = foldl((a,b)->a*','*' '*b, v)
+            packstr *= "      $(mask('@'))pack$(mask('!')) $(k) = $(v)\n"
+        end
+    end
+
+    # insert `@pack!` line before final return
+    rx = Regex("^(\\h*\\d+\\h+|\\h+)$(mask("lastreturn"))", "mi")
+    m = match(rx, code)
+    if isempty(strip(m.captures[1])) # without leading label
+        code = replace(code, m.match => SS("$(m.captures[1])\n$packstr      $(mask("lastreturn"))"))
+    else
+        label = strip(m.captures[1])
+        l = length(m.captures[1])
+        code = replace(code, m.match =>
+                        SS(' '^l * "$(mask('@'))label L$(label)\n" *
+                           ' '^l * "$(lstrip(packstr))      $(mask("lastreturn"))"))
+    end
+
+    # replace each RETURN with "@goto Lreturn" and restore last return
+    code = replace(code, Regex("\\b$(mask("return"))\\b") => SS("$(mask('@'))goto Lreturn\\2"))
+    code = replace(code, Regex("\\b$(mask("lastreturn"))\\b") => SS("$(mask("return"))"))
+
+    return code
+end
+
+function commentoutdeclarations(code, commentstrings)
+
+    patterns = [
+        r"^\h*common\h*\/\h*\w+\h*\/\h*"mi,
+        r"^\h*dimension\h+"mi,
+        r"^\h*implicit\h*\w+"mi,
+        r"^\h*real(?!.*parameter).*::"mi, # https://regex101.com/r/7YxbnB/1
+        r"^\h*real\h*$"mi,
+        r"^\h*real\h+(?!.*function)"mi, # https://regex101.com/r/CFiiOx/1
+        r"^\h*real\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*double\h*precision(?!.*parameter).*::"mi,
+        r"^\h*double\h*precision\h*$"mi,
+        r"^\h*double\h*precision\h+(?!.*function)"mi,
+        r"^\h*complex(?!.*parameter).*::"mi,
+        r"^\h*complex\h*$"mi,
+        r"^\h*complex\h+(?!.*function)"mi,
+        r"^\h*complex\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*integer(?!.*parameter).*::"mi,
+        r"^\h*integer\h*$"mi,
+        r"^\h*integer\h+(?!.*function)"mi,
+        r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*integer\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
+        r"^\h*character(?!.*parameter).*::"mi,
+        r"^\h*character\h*$"mi,
+        r"^\h*character\h+(?!.*function)"mi,
+        r"^\h*character\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\*\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\*\h*\([\h\w_*+-]+\)\h*(?!.*function)"mi,
+        r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*external\h+"mi,
+        r"^\h*logical(?!.*parameter).*::"mi,
+        r"^\h*logical\h*$"mi,
+        r"^\h*logical\h+(?!.*function)"mi,
+        r"^\h*allocatable\h+"mi,
+        r"^\h*entry\h+.*"mi,
+        r"^\h*save\h+.*"mi,
+        r"^\h*equivalence\h+.*"mi,
+        r"^\h+\d+\h+format\h*\("mi
+    ]
+
+    for rx in patterns
+        for m in reverse(collect(eachmatch(rx, code)))
+            r = continuedlinesrange(code, m.offset)
+            str = '#' * replace(code[r], r"(\r\t|\n\t)"m => s"\1#")
+            code = code[1:prevind(code,r[1])] * str * code[nextind(code,r[end]):end]
+        end
+    end
+
+    return savecomments(code, commentstrings, identity)
 end
 
 function processdostatements(code::AbstractString)
@@ -705,7 +1136,7 @@ function processdostatements(code::AbstractString)
     for m in reverse(collect(eachmatch(rx, code)))
         r = continuedlinesrange(code, m.offset)
         success,s1,lbl,var,ex1,ex2,ex3,com = parsedostatement(code[r])
-        @show success,s1,lbl,var,ex1,ex2,ex3,com
+        #@show success,s1,lbl,var,ex1,ex2,ex3,com
         if success
             length(lbl) > 0 && (lbl *= " ")
             length(ex3) > 0 && (ex3 *= ":")
@@ -729,7 +1160,7 @@ function parsedostatement(line)
 
     while true
         ttype = picktoken(line, pstn)
-        print("_$ttype")
+        #print("_$ttype")
         if ttype == 'e' || ttype == '#'
             break
         elseif ttype == ' '
@@ -797,6 +1228,128 @@ function parsedostatement(line)
            strip(line[starts[2]:starts[3]-2]),
            strip(line[starts[3]:pstn-1]),
            rstrip(line[pstn:end])                   # trailing comment
+end
+
+function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
+    # https://regex101.com/r/FG2iyI/4
+    #rxlabeled = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
+    rxlabeled = r"^(?:\h*(\d+)\h+)\b\w+\b"im
+    rxcont = r"^(\h*(\d+)\h+)continue\h*"im
+    rxlabel = r"^(\h*(\d+)\h+)(.*?)$"im
+
+    # insert absent 'CONTINUE' in 'LABEL SOMETHING'
+    if !dontfixcontinue
+        for mx in reverse(collect(eachmatch(rxlabeled, code)))
+            r = continuedlinesrange(code, mx.offset)
+            isnothing(match(rxcont, code[r])) || continue
+            str = stripcomments(rstrip(concatcontinuedlines(code[r])))
+            (m = match(rxlabel, str)) != nothing || continue
+            if dolabels[m.captures[2]] > 0
+                res = " "^length(m.captures[1]) * replace(str, rxlabel=>s"\3")
+                for _ = 1:dolabels[m.captures[2]]
+                    res *= "\n" * m.captures[1] * "continue\n"
+                end
+                code = code[1:prevind(code,r[1])] *
+                       replace(res, r"\t\t"=>"\t\r\t") * code[nextind(code,r[end]):end]
+            end
+        end
+    end
+
+    lines, comments = splitoncomment(code)
+    # replace 'LABEL CONTINUE' with 'end do'
+    for i in axes(lines,1)
+        m = match(rxcont, lines[i])
+        if !isnothing(m) && dolabels[m.captures[2]] > 0
+            if m.captures[2] in gotolabels
+                # 'CYCLE' emulation in the old fortran,
+                # beware to have 'GOTO LABEL' outside of the loop
+                rxgoto = Regex("go\\h*to\\h+"*m.captures[2], "i")
+                lines = map(a->replace(a, rxgoto => s"cycle"), lines)
+                pop!(gotolabels, m.captures[2])
+            end
+            lines[i] = " "^length(m.captures[1]) * "end do"
+            dolabels[m.captures[2]] -= 1
+            for _ = dolabels[m.captures[2]]:-1:1
+                lines[i] *= '\n' * ' '^length(m.captures[1]) * "end do"
+            end
+            dolabels[m.captures[2]] = 0
+        end
+    end
+
+    # not replaced LABELs should be fixed by hands
+    rx = r"^(\h*(?:do|for)\h+)(\d+)(\h+.*)$"i
+    for i in axes(lines,1)
+        m = match(rx, lines[i])
+        if !isnothing(m) && dolabels[m.captures[2]] > 0
+            lines[i] = replace(lines[i], rx => s"\1FIXME: L\2\3")
+        end
+    end
+
+    lines = map(*, lines, comments)
+    return sameasarg(code, lines)
+end
+
+"""
+replace conditional GOTOs with GOTOs in branch of julia's `if else` statements
+"""
+function processconditionalgotos(code)
+    # GOTO (10,20,30,40) SOMEEXPR
+    # https://regex101.com/r/nKZmku/3
+    rx = r"(\h*\d+:?\h*|\h*)go\h*?to\h*\(\h*\d+\h*,.*"i
+    rxfull = r"^(\h*\d+:?\h*|\h*)(.*?|)(\h*|)go\h*?to\h*\((\h*\d+\h*(?:,\h*\d+\h*)*)\)(?:\h*,|)\h*([^#\n]*)\h*(#.*|)$"i
+    for m in reverse(collect(eachmatch(rx, code)))
+        r = continuedlinesrange(code, m.offset)
+        str = stripcommentsbutlast(rstrip(concatcontinuedlines(code[r])))
+        c = match(rxfull, str).captures
+        hl = length(c[1]); head = ' '^hl
+        if isempty(strip(c[2]))
+            ifexpr = c[1]
+            tail = isempty(strip(c[6])) ? "" : "\n$(head)$(c[6])"
+        else # there can prepend only the one-line-if, thus expand it to multiline
+            @assert occursin(r"^if"i, c[2]) == true
+            head *= "    "
+            ifexpr = "$(c[1])$(c[2]) then\n$head"
+            tail = isempty(strip(c[6])) ? "\n$(' '^hl)end" : "\n$(head)$(c[6])\n$(' '^hl)end"
+        end
+        expr = c[5]; gotos = map(strip, split(c[4], ','))
+        if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
+            cond = expr
+        else
+            cond = @sprintf "GTO%s" mod(hash("$(expr)"), 2^16)
+            ifexpr *= head * "$cond = $expr\n"
+        end
+        for (i,g) = enumerate(gotos)
+            ifexpr *= "if ($(cond) .eq. $(i)) then\n$(head)    $(mask('@'))goto L$(g)\n$(head)else"
+        end
+        ifexpr *= "\n$(head)    $(mask('@'))error(\"non-exist label " *
+                  "$(cond)=$(mask('"'))\$($(cond))$(mask('"')) " *
+                  "in goto list\")\n$(head)end$(tail)\n"
+        code = code[1:prevind(code,r[1])] * ifexpr * code[nextind(code,r[end]):end]
+    end
+
+    # GOTO EXPR,(10,20,30,40)
+    # https://regex101.com/r/nHwb10/4
+    # https://regex101.com/r/iYG7BH/6
+    rx = r"(\h*\d+:?\h*|\h*)go\h*?to\h*\w+\h*(?:,\h*|)\(\h*\d+\h*,.*"i
+    rxfull = r"^(\h*\d+:?\h*|\h*)(.*?|)(\h*|)go\h*?to\h+(\w+)\h*(?:,\h*|)\((\h*\d+\h*(?:,\h*\d+\h*)*)\)(.*)$"i
+    for m in reverse(collect(eachmatch(rx, code)))
+        r = continuedlinesrange(code, m.offset)
+        str = stripcommentsbutlast(rstrip(concatcontinuedlines(code[r])))
+        c = match(rxfull, str).captures
+        head = ' '^length(c[1])
+        tail = isempty(strip(c[6])) ? "" : "\n$(head)$(c[6])"
+        @assert c[2] == ""
+        ifexpr = isempty(strip(c[2])) ? c[1] : c[1] * c[2] * '\n' * head
+        var = c[4]; gotos = map(strip, split(c[5], ','))
+        for g in gotos
+            ifexpr *= "if ($(var) .eq. $(g)) then\n$(head)    $(mask('@'))goto L$(g)\n$(head)else"
+        end
+        ifexpr *= "\n$(head)    $(mask('@'))error(\"non-exist label " *
+                  "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
+                  "in goto list\")\n$(head)end$(tail)\n"
+        code = code[1:prevind(code,r[1])] * ifexpr * code[nextind(code,r[end]):end]
+    end
+    return code
 end
 
 function processifstatements(code)
@@ -895,739 +1448,44 @@ function parseifstatement(str, pstn)
            str[startcond:endcond], str[startexec:endexec], afterthencomment
 end
 
-function processiostatements(code::AbstractString, formats, formatstrings)
-    rxhead = r"(\bread\b|\bwrite\b)\h*\("mi
-    rxargs = r"^((?:.*[\n])*.*?)(\h*#[^\n]*)"m  # https://regex101.com/r/PqvHQD/1
-    for (i,m) in enumerate(reverse(collect(eachmatch(rxhead, code))))
-        o = m.offset
-        readwrite = lowercase(replace(m.match, rxhead => s"\1"))
-        iolength, io, label, fmt, pmt, paramsstr, args = parsereadwrite(code, o)
-        @show iolength, io, label, fmt, pmt, paramsstr, args
-        # if it is possible then convert else delay convert call
-        if length(label) > 0 && haskey(formats, label)
-            fmt = formats[label]
-        elseif length(label) > 0 && haskey(formatstrings, label)
-            fmt = replace(formatstrings[label], r"^'\((.*)\)'$" => s"\1")
-            #FIXME: fmt = unescapeformatstring(formatstrings[label])
-        elseif length(label) > 0
-            @error("delayed format conversion call with $label")
-        else
-            formats["FMT$(m.offset)"] = fmt
-        end
-        fmt = convertformat(fmt)
-        if  readwrite == "read" && (io == "5" || io == "*")
-            io = "stdin"
-        elseif  readwrite == "write" && (io == "6" || io == "*")
-            io = "stdout"
-        end
-        args = occursin(rxargs, args) ? replace(args, rxargs=>s"\1)\2") : rstrip(args)*')'
-        str  =  readwrite == "read" ? "READ(" :
-                fmt       == ""    ? "println(" : "$(mask('@'))printf("
-        if str == "$(mask('@'))printf("
-            fmt = occursin(r"\$$", fmt) ? replace(fmt, @r_str("\\\$\$") => "") : fmt*"\\n"
-        end
-
-        #length(fmt) > 0 && @show fmt
-        fmt != "" && (fmt = '"' * fmt * "\", " )
-        str *= io * ", " * fmt * args
-        code = code[1:prevind(code,o)] * str * code[thisind(code,o+iolength):end]
-    end
-    return code, formats
-end
-
-function parsereadwrite(str, pstn)
-    pstn0 = pstn
-    label = fmt = IU = formatvar = ""
-    params = Dict{String,String}()
-    cmdtaken = false
-    inparams = false
-    nextparam = 1
-    startsparam = Int[]
-    endsparam = Int[]
-    startargs = 0
-    endargs = -1
-    inbraces  = 0
-
-    while true
-        ttype = picktoken(str, pstn)
-        #print("_$ttype")
-        if ttype == 'e' || ttype == '\n'
-            break
-        elseif ttype == ' '
-            pstn = skipspaces(str, pstn)
-        elseif !cmdtaken && ttype == 'l'
-            lex, pstn = taketoken(str, pstn)
-            if lowercase(lex) == "read" || lowercase(lex) == "write"
-                cmdtaken = true
-                pstn = skipspaces(str, pstn)
-            else
-                # that is not an 'READ/WRITE' statement
-                return 0, "", "", "", "", "", "", ""
-            end
-        elseif cmdtaken && inparams && ttype == 'l'
-            lex, pstn = taketoken(str, pstn)
-            LEX = uppercase(lex)
-            if LEX == "FMT" && picktoken(str, skipspaces(str, pstn)) == '='
-                label, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
-            elseif (LEX == "ERR" || LEX == "END") && picktoken(str, skipspaces(str, pstn)) == '='
-                val, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
-                params[uppercase(lex)] = val
-            elseif nextparam == 1
-                IU = lex
-            else
-                # this is the format string in variable (or just saved)
-                formatvar = lex
-                occursin(r"^FMT\d{6}$", lex) ||
-                @warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
-                      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, pstn)]))\"\n")
-            end
-        elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
-            IU, pstn = taketoken(str, pstn)
-        elseif cmdtaken && inparams && ttype == 'd'
-            label, pstn = taketoken(str, pstn)
-        elseif cmdtaken && inparams && ttype == '*' && nextparam == 1
-            IU, pstn = taketoken(str, pstn)
-        elseif cmdtaken && inparams && ttype == ''' || ttype == '*'
-            fmt, pstn = taketoken(str, pstn)
-            fmt = concatcontinuedlines(fmt)
-            fmt = replace(fmt, "GhUtwoap_iZjAcpPokM" => "'")
-        elseif ttype == '('
-            inbraces += 1
-            pstn = skiptoken(str, pstn)
-            if length(startsparam) == 0
-                push!(startsparam, pstn)
-                inparams = true
-            end
-        elseif ttype == ')'
-            inbraces -= 1
-            if inbraces == 0 && inparams
-                push!(endsparam, prevind(str, pstn))
-                startargs = nextind(str, pstn)
-                inparams = false
-                endargs = pstn = skipupto('\n', str, pstn)
-                endargs = prevind(str, endargs)
-                break
-            end
-            pstn = skiptoken(str, pstn)
-        elseif ttype == ',' && inparams && inbraces == 1
-            push!(endsparam, prevind(str, pstn))
-            pstn = skiptoken(str, pstn)
-            push!(startsparam, thisind(str, pstn))
-            nextparam += 1
-        else
-            pstn = skiptoken(str, pstn)
-        end
-    end
-
-    IU = strip(str[startsparam[1]:endsparam[1]])
-
-    label == "" && (label = formatvar)
-
-    if fmt == "*"
-        fmt = ""
-    else
-        fmt = replace(fmt, r"^\((.*)\)$"=>s"\1") # it is unenclose "()"
-    end
-    fmt = foldl((a,b) -> a*','*b, map(strip, split(fmt, ",")))
-
-    return ncodeunits(str[pstn0:prevind(str,pstn)]), IU, label, fmt, params,
-           str[startsparam[1]:endsparam[end]], str[startargs:endargs]
-end
-
-function splitformat(str)
-    pstn = 1
-    lexemstarts = Int[1]
-    lexemends = Int[]
-    inbraces  = 0
-
-    while true
-        ttype = picktoken(str, pstn)
-        #print("_$ttype")
-        if ttype == 'e' || ttype == '\n'
-            break
-        elseif ttype == ' '
-            pstn = skipwhitespaces(str, pstn)
-        elseif ttype == ',' && inbraces == 0
-            push!(lexemends, prevind(str, pstn))
-            pstn = skiptoken(str, pstn)
-            push!(lexemstarts, thisind(str, pstn))
-        elseif ttype == '/' && inbraces == 0
-            if pstn > lexemstarts[end]
-                push!(lexemends, prevind(str, pstn))
-                push!(lexemstarts, thisind(str, pstn))
-            end
-            push!(lexemends, thisind(str, pstn))
-            pstn = skiptoken(str, pstn)
-            push!(lexemstarts, thisind(str, pstn))
-        elseif ttype == '('
-            inbraces += 1
-            pstn = skiptoken(str, pstn)
-        elseif ttype == ')'
-            inbraces -= 1
-            pstn = skiptoken(str, pstn)
-        else
-            pstn = skiptoken(str, pstn)
-        end
-    end
-    push!(lexemends, ncodeunits(str))
-    @assert length(lexemstarts) == length(lexemends)
-
-    fmt = String[]
-    for (i,j) in zip(lexemstarts, lexemends)
-        push!(fmt, strip(str[i:j]))
-    end
-
-    return fmt
-end
-
-function picktoken(str, i)
-    # may be there should be used `Base.Unicode.category_abbrev()` or `Base.Unicode.category_code()`
-    len = ncodeunits(str)
-    i = thisind(str, i)
-    i > len && return 'e'
-    c = str[i]
-    if isspace(c) && c != '\n'
-        return ' '
-    elseif isdigit(c)
-        return 'd'
-    elseif isletter(c)
-        return 'l'
-    elseif c == '\n' && catchcontinuedlines(str, i)[1]
-        return ' '
-    elseif c == '\n'
-        return 'e'
-    else
-        return c
-    end
-end
-
-function catchtokenvar(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    start = i
-    while true
-        i = nextind(str, i)
-        if eos() || !(picktoken(str, i) in ('l', 'd', '_'))
-            return start, prevind(str,i)
-        end
-    end
-end
-function catchtokenstring(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    @assert str[i] == '''
-    start = nextind(str, i)
-    while true
-        i = nextind(str, i)
-        eos() && return start, prevind(str, i)
-        if picktoken(str, i) == ''' && picktoken(str, nextind(str, i)) == ''' # double ' -- escaped
-            i = nextind(str, i)
-        elseif picktoken(str, i) == '''
-            return start, prevind(str, i)
-        end
-    end
-end
-function catchbrackets(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    @assert str[i] == '['
-    inbraces = 1
-    start = nextind(str, i)
-    while true
-        i = nextind(str, i)
-        eos() && return start, prevind(str, i)
-        if picktoken(str, i) == '['
-            inbraces += 1
-        elseif inbraces == 1 && picktoken(str, i) == ']'
-            return start, prevind(str, i)
-        elseif picktoken(str, i) == ']'
-            inbraces -= 1
-        end
-    end
-end
-function catchbraces(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    @assert str[i] == '('
-    inbraces = 1
-    start = nextind(str, i)
-    while true
-        i = nextind(str, i)
-        eos() && return start, prevind(str, i)
-        if picktoken(str, i) == '('
-            inbraces += 1
-        elseif inbraces == 1 && picktoken(str, i) == ')'
-            return start, prevind(str, i)
-        elseif picktoken(str, i) == ')'
-            inbraces -= 1
-        end
-    end
-end
-function catchtoken(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    start = i
-    ttype = picktoken(str, i)
-    while true
-        i = nextind(str, i)
-        if eos() || picktoken(str, i) != ttype
-            return start, prevind(str,i)
-        end
-    end
-end
-function catchspaces(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    eos() && return len, prevind(str,len)
-    start = i
-    while !eos() && isspace(str[i])
-        if str[i] != '\n'
-            i = nextind(str, i)
-        else
-            caught, _, iend = catchcontinuedlines(str, i)
-            if caught
-                i = nextind(str, iend)
-            else
-                break
-            end
-        end
-    end
-    return start, prevind(str,i)
-end
-function catchcomment(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    eos() && return len, prevind(str,len)
-    start = i
-    while !eos() && str[i] != '\n'
-        i = nextind(str, i)
-    end
-    return start, prevind(str, i)
-end
-function catchcontinuedlines(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    eos() && return false, len, prevind(str,len)
-    str[i] != '\n' && return false, i, prevind(str,i)
-    if isfixedformfortran && len>nextind(str,i,6) &&
-       str[nextind(str,i):nextind(str,i,5)] == "     " && str[nextind(str,i,6)] != ' '
-        return true, i, nextind(str,i,6)
-    elseif !isfixedformfortran && iscontinuedlinefreeform(str, i)
-        # look behind for '&' at the end of line
-        return true, i, i
-    else
-        return false, i, prevind(str,i)
-    end
-end
-
-function iscontinuedlinefreeform(str, i)
-    i = thisind(str, i)
-    len = i
-    while len < ncodeunits(str) && str[len] !='\n'
-        len = nextind(str, len)
-    end
-    # look from start of line
-    while i>1 && str[prevind(str, i)] !='\n'
-        i = prevind(str, i)
-    end
-    while i <= len
-        if str[i] == ' '
-            i = skipwhitespaces(str, i)
-        elseif str[i] == '''
-            i = skiptoken(str, i)
-        elseif str[i] == '#'
-            return false
-        elseif str[i] == '&'
-            t, i = '&', nextind(str, i)
-            i = skipwhitespaces(str, i)
-            if i > ncodeunits(str) || str[i] == '#' || str[i] == '\n'
-                return true
-            elseif str[i] == '&' # catch "&&" operator
-                i = nextind(str, i)
-            else
-                @warn("unexpected '$(str[i])' after '$(t)'")
-                i = skiptoken(str, i)
-            end
-        else
-            i = skiptoken(str, i)
-        end
-    end
-    return false
-end
-
-function marktoken(str, i)
-    len = ncodeunits(str); i = thisind(str, i)
-    i > len && return len, prevind(str, len), len+1
-    ttype = picktoken(str, i)
-    if ttype == 'l'      # catch keywords and identifiers
-        startpos, endpos = catchtokenvar(str, i)
-        return startpos, endpos, nextind(str, endpos)
-    elseif ttype == '''  # strings
-        startpos, endpos = catchtokenstring(str, i)
-        return startpos, endpos, nextind(str, nextind(str, endpos))
-    elseif ttype == ' '  # catch spaces
-        startpos, endpos = catchspaces(str, i)
-        return startpos, endpos, nextind(str, endpos)
-    elseif ttype == '#'  # catch comment
-        startpos, endpos = catchcomment(str, i)
-        return startpos, endpos, nextind(str, endpos)
-    #elseif ttype == 'd'  # catch integer|float numbers
-    elseif ttype == 'd'  # catch integer number
-        startpos, endpos = catchtoken(str, i)
-        return startpos, endpos, nextind(str, endpos)
-    elseif ttype == '*'  # catch '**' operator
-        startpos, endpos = catchtoken(str, i)
-        return startpos, endpos, nextind(str, endpos)
-    else                 # all other tokens should be singles
-        return i, i, nextind(str, i)
-    end
-end
-
-taketoken(str, i)     =  ( (p1,p2,p3) -> (str[p1:p2], p3) )(marktoken(str, i)...)
-picknexttoken(str, i) =  picktoken(str, marktoken(str, i)[3])
-skiptoken(str, i)     =  marktoken(str, i)[3]
-skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : i
-skipspaces(str, i)    = catchspaces(str, i)[2] + 1
-skipcomment(str, i)   = catchcomment(str, i)[2] + 1
-skipbraces(str, i)    = nextind(str, nextind(str, catchbraces(str, i)[2]))
-skipbrackets(str, i)  = nextind(str, nextind(str, catchbrackets(str, i)[2]))
-isoneline(str)        = !('\n' in str)
-existind(str, i)      = thisind(str, min(max(1,i), ncodeunits(str)))
-
-function skipwhitespaces(str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    eos() && return len+1
-    while !eos() && str[i] == ' '
-        i = nextind(str, i)
-    end
-    return i
-end
-
-"""
-returns the last position of token of requested char
-"""
-function skipupto(c, str, i)
-    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
-    while true
-        eos() && return len+1
-        if str[i] == ''' != c # skip string
-            i = skiptoken(str, i)
-        elseif str[i] == c == '\n'
-            caught, _, iend = catchcontinuedlines(str, i)
-            if caught
-                i = nextind(str, iend)
-            else
-                break
-            end
-        elseif str[i] == '#' != c
-            i = skipcomment(str, i)
-        elseif str[i] == c
-            break
-        else
-            i = nextind(str, i)
-        end
-    end
-    return i
-end
-
-function startoflineind(str, i)
-    i = thisind(str, i)
-    i < 1 && return 0
-    while i>1 && str[prevind(str, i)] !='\n'
-        i = prevind(str, i)
-    end
-    return i
-end
-function endoflineind(str, i)
-    i = thisind(str, i)
-    i > ncodeunits(str) && return ncodeunits(str)+1
-    while i < ncodeunits(str) && str[i] !='\n'
-        i = nextind(str, i)
-    end
-    return i
-end
-thislinerange(str, i) = UnitRange(startoflineind(str, i):endoflineind(str, i))
-function nextlinerange(str, i)
-    i = thisind(str, i)
-    firstip1 = nextind(str, endoflineind(str, i))
-    if firstip1 >= ncodeunits(str)
-        return UnitRange(firstip1:ncodeunits(str))
-    else
-        return UnitRange(firstip1:endoflineind(str, firstip1))
-    end
-end
-function prevlinerange(str, i)
-    i = thisind(str, i)
-    lastim1 = prevind(str, startoflineind(str, i))
-    if lastim1 < 1
-        return UnitRange(1:lastim1)
-    else
-        return UnitRange(startoflineind(str, lastim1):lastim1)
-    end
-end
-
-function continuedlinesrange(str, i)
-    i = thisind(str, i)
-    firsti = startoflineind(str, i)
-    while iscontinued(str[prevlinerange(str, firsti)], str[thislinerange(str, firsti)])
-        firsti = startoflineind(str, prevind(str, firsti))
-    end
-    lasti = endoflineind(str, i)
-    while iscontinued(str[thislinerange(str, lasti)], str[nextlinerange(str, lasti)])
-        lasti = endoflineind(str, nextind(str, lasti))
-    end
-    return UnitRange(firsti, lasti)
-end
-
-"""
-replace conditional GOTOs with GOTOs in branch of julia's `if else` statements
-"""
-function processconditionalgotos(code)
-    # GOTO (10,20,30,40) SOMEEXPR
-    # https://regex101.com/r/nKZmku/3
-    rx = r"(\h*\d+:?\h*|\h*)go\h*?to\h*\(\h*\d+\h*,.*"i
-    rxfull = r"^(\h*\d+:?\h*|\h*)(.*?|)(\h*|)go\h*?to\h*\((\h*\d+\h*(?:,\h*\d+\h*)*)\)(?:\h*,|)\h*([^#\n]*)\h*(#.*|)$"i
+function processarithmif(code::AbstractString)
+    # https://regex101.com/r/5R0qtY/1/
+    rx = r"\bif\b\h*(\(((?>[^\(\)]++|(?1))*)\))\h*(\d+)\h*,\h*(\d+)\h*,\h*(\d+)"i
     for m in reverse(collect(eachmatch(rx, code)))
-        r = continuedlinesrange(code, m.offset)
-        str = stripcommentsbutlast(rstrip(concatcontinuedlines(code[r])))
-        c = match(rxfull, str).captures
-        hl = length(c[1]); head = ' '^hl
-        if isempty(strip(c[2]))
-            ifexpr = c[1]
-            tail = isempty(strip(c[6])) ? "" : "\n$(head)$(c[6])"
-        else # there can prepend only the one-line-if, thus expand it to multiline
-            @assert occursin(r"^if"i, c[2]) == true
-            head *= "    "
-            ifexpr = "$(c[1])$(c[2]) then\n$head"
-            tail = isempty(strip(c[6])) ? "\n$(' '^hl)end" : "\n$(head)$(c[6])\n$(' '^hl)end"
-        end
-        expr = c[5]; gotos = map(strip, split(c[4], ','))
+        line = m.match
+        str = "\n"
+        expr = m.captures[2]
+        L1, L2, L3 = m.captures[3:5]
         if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
             cond = expr
         else
-            cond = @sprintf "GTO%s" mod(hash("$(expr)"), 2^16)
-            ifexpr *= head * "$cond = $expr\n"
+            cond = @sprintf "CND%s" mod(hash("$(expr)"), 2^16)
+            str *= "      $cond = $expr\n"
         end
-        for (i,g) = enumerate(gotos)
-            ifexpr *= "if ($(cond) .eq. $(i)) then\n$(head)    $(mask('@'))goto L$(g)\n$(head)else"
-        end
-        ifexpr *= "\n$(head)    $(mask('@'))error(\"non-exist label " *
-                  "$(cond)=$(mask('"'))\$($(cond))$(mask('"')) " *
-                  "in goto list\")\n$(head)end$(tail)\n"
-        code = code[1:prevind(code,r[1])] * ifexpr * code[nextind(code,r[end]):end]
+        str *= "      if $cond < 0\n" *
+               "        goto $L1\n" *
+               "      elseif $cond == 0\n" *
+               "        goto $L2\n" *
+               "      else\n" *
+               "        goto $L3\n" *
+               "      end\n      "
+        o = m.offset; l = ncodeunits(m.match)
+        code = code[1:prevind(code,o)] * str * code[thisind(code,o+l):end]
     end
+    return code
+end
 
-    # GOTO EXPR,(10,20,30,40)
-    # https://regex101.com/r/nHwb10/4
-    # https://regex101.com/r/iYG7BH/6
-    rx = r"(\h*\d+:?\h*|\h*)go\h*?to\h*\w+\h*(?:,\h*|)\(\h*\d+\h*,.*"i
-    rxfull = r"^(\h*\d+:?\h*|\h*)(.*?|)(\h*|)go\h*?to\h+(\w+)\h*(?:,\h*|)\((\h*\d+\h*(?:,\h*\d+\h*)*)\)(.*)$"i
+function shapinglabels(code::AbstractString)
+    rx = r"^(((\h+|)(\d+)(\h+))(\w+|))"m
     for m in reverse(collect(eachmatch(rx, code)))
-        r = continuedlinesrange(code, m.offset)
-        str = stripcommentsbutlast(rstrip(concatcontinuedlines(code[r])))
-        c = match(rxfull, str).captures
-        head = ' '^length(c[1])
-        tail = isempty(strip(c[6])) ? "" : "\n$(head)$(c[6])"
-        @assert c[2] == ""
-        ifexpr = isempty(strip(c[2])) ? c[1] : c[1] * c[2] * '\n' * head
-        var = c[4]; gotos = map(strip, split(c[5], ','))
-        for g in gotos
-            ifexpr *= "if ($(var) .eq. $(g)) then\n$(head)    $(mask('@'))goto L$(g)\n$(head)else"
-        end
-        ifexpr *= "\n$(head)    $(mask('@'))error(\"non-exist label " *
-                  "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
-                  "in goto list\")\n$(head)end$(tail)\n"
-        code = code[1:prevind(code,r[1])] * ifexpr * code[nextind(code,r[end]):end]
+        label, tail = m.captures[4], m.captures[6]
+        o = m.offset; l = ncodeunits(m.captures[1])
+        head = ' '^ncodeunits(m.captures[2])
+        str = "$(head)$(mask('@'))label L$label"
+        uppercase(tail) != "CONTINUE" && (str *= "\n$head$tail")
+        code = code[1:prevind(code,o)] * str * code[thisind(code,o+l):end]
     end
     return code
-end
-
-function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
-    lines, comments = splitoncomment(code)
-
-    # https://regex101.com/r/FG2iyI/4
-    rxlabeled = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
-    rxcont = r"^(\h*(\d+)\h+)continue\h*"i
-    rxlabel = r"^(\h*(\d+)\h+)(.*?)$"i
-
-    # insert absent CONTINUE in LABEL SOMETHING
-    if !dontfixcontinue
-        for i in axes(lines,1)
-            if !isnothing(match(rxlabeled, lines[i])) && isnothing(match(rxcont, lines[i]))
-                (m = match(rxlabel, lines[i])) != nothing || continue
-                if dolabels[m.captures[2]] > 0
-                    lines[i] = " "^length(m.captures[1]) * replace(lines[i], rxlabel=>s"\3")
-                    for _ = 1:dolabels[m.captures[2]]
-                        lines[i] *= "\n" * m.captures[1] * "continue"
-                    end
-                end
-            end
-        end
-        code1 = tostring(map(*, lines, comments))
-        lines, comments = splitoncomment(code1)
-    end
-
-    # replace 'LABEL CONTINUE' with 'end do'
-    for i in axes(lines,1)
-        m = match(rxcont, lines[i])
-        if !isnothing(m) && dolabels[m.captures[2]] > 0
-            if m.captures[2] in gotolabels
-                # 'CYCLE' emulation in the old fortran,
-                # beware to have 'GOTO LABEL' outside of the loop
-                rxgoto = Regex("go\\h*to\\h+"*m.captures[2], "i")
-                lines = map(a->replace(a, rxgoto => s"cycle"), lines)
-                pop!(gotolabels, m.captures[2])
-            end
-            lines[i] = " "^length(m.captures[1]) * "end do"
-            dolabels[m.captures[2]] -= 1
-            for _ = dolabels[m.captures[2]]:-1:1
-                lines[i] *= '\n' * ' '^length(m.captures[1]) * "end do"
-            end
-            dolabels[m.captures[2]] = 0
-        end
-    end
-
-    # not replaced LABELs should be fixed by hands
-    rx = r"^(\h*(?:do|for)\h+)(\d+)(\h+.*)$"i
-    for i in axes(lines,1)
-        m = match(rx, lines[i])
-        if !isnothing(m) && dolabels[m.captures[2]] > 0
-            lines[i] = replace(lines[i], rx => s"\1FIXME: L\2\3")
-        end
-    end
-
-    lines = map(*, lines, comments)
-    return sameasarg(code, lines)
-end
-
-"""
-replace array's braces with square brackets
-"""
-function replacearraysbrackets(code, arrays)
-
-    # remove whitespace between array name and left brace
-    for a in arrays
-        rx = Regex("(\\b$(a)\\b)\\h+\\(","i")
-        code = replace(code, rx => s"\1(")
-    end
-
-    # lookup "ARRAYNAME(" and replace
-    braces = Regex("\\(((?>[^()]|(?R))*)\\)") # complementary braces
-    brackets = SS("[\\1]")
-    for a in arrays
-        rx = Regex("\\b$(a)\\b\\(","i")
-        for m in collect(eachmatch(rx, code))
-            o = m.offset
-            code = code[1:prevind(code,o+ncodeunits(a))] *
-                   replace(code[thisind(code,o+ncodeunits(a)):end], braces => brackets, count=1)
-            #code = code[1:prevind(code,o)] * replace(code[o:end], braces => brackets, count=1)
-        end
-    end
-
-    # catch second braces, for arrays of strings, https://regex101.com/r/2WIc50/1
-    rx = r"(\[((?>[^\[\]]++|(?1))*)\])\h*(\(((?>[^\(\)]++|(?1))*)\))"
-    code = replace(code, rx => s"\1[\4]")
-
-    # fix uncompleted ranges in square braces like [1:] and [:1]
-    brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
-    # trim spaces around ':'
-    rx = r"\[(.*|)([ ]+|):([ ]+|)(.*|)\]"
-    for m in reverse(collect(eachmatch(brackets, code)))
-        if occursin(rx, m.match)
-            o = m.offset
-            code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
-        end
-    end
-    # uppend with "end"
-    rx = r"\[(.*[^,]):(,.*|)\]"
-    for m in reverse(collect(eachmatch(brackets, code)))
-        if occursin(rx, m.match)
-            o = m.offset
-            code = code[1:o-1] * replace(m.match, rx => s"[\1:lastpos_iZjAcpPokM\2]") *
-                   code[o+length(m.match):end]
-        end
-    end
-    # prepend with '1'
-    rx = r"\[:([^,].*)\]"
-    for m in reverse(collect(eachmatch(brackets, code)))
-        if occursin(rx, m.match)
-            o = m.offset
-            code = code[1:o-1] * replace(m.match, rx => s"[1:\1]") * code[o+length(m.match):end]
-        end
-    end
-    return code
-end
-
-function savecomments(code, commentstrings, casetransform=identity)
-
-    rx = r"[ ]*#(?!CMMNT\d{10}).*(?:\t|)$" # spaces go to comments
-    lines = splitonlines(code)
-
-    for i in axes(lines,1)
-        if (m = match(rx, lines[i])) != nothing
-            str = m.match
-            key = @sprintf "CMMNT%05d%05d" i mod(hash(str), 2^16)
-            commentstrings[key] = String(str)
-            # case conversion while comments are detached
-            lines[i] = casetransform(replace(lines[i], m.match => s"")) * " #$key"
-        else
-            # cut out all whitespaces not masked by the comments
-            lines[i] = casetransform(replace(lines[i], r"[ ]*(\t|)$" => s"\1"))
-        end
-    end
-    return sameasarg(code, lines), commentstrings
-end
-function restorecomments(code, commentstrings)
-    for (k,v) in commentstrings
-        code = replace(code, Regex("[ ]?#?$k") => v)
-    end
-    return code
-end
-
-"""
-save and replace all strings with its keys
-"""
-function saveallstrings(code::AbstractString)
-
-    # save escaped "\""
-    #code = replace(code, r"[\\][\"]" => "quote_iZjAcpPokM") # who did that?
-
-    strings = OrderedDict{String, String}()
-
-    # replace 'strings' with "strings" in code
-    rxstr = r"('((?>[^'\n]*|(?1))*)')"m
-    for m in reverse(collect(eachmatch(rxstr, code)))
-        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
-        if length(m.captures[1]) > 3 || length(m.captures[1]) == 2
-            strings[key] = '"' * m.captures[2] * '"'
-            code = replace(code, m.match => key)
-        else # 'X' -- some symbol
-            strings[key] = m.captures[1]
-            code = replace(code, m.match => key)
-        end
-    end
-    rxstr = r"(\"((?>[^\"\n]*|(?1))*)\")"m
-    for m in reverse(collect(eachmatch(rxstr, code)))
-        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
-        strings[key] = m.captures[1]
-        code = replace(code, m.match => key)
-    end
-
-    # save empty strings ''
-    key = @sprintf "STR%siZjAcpPokM" mod(hash("\"\""), 2^20)
-    strings[key] = "\"\""
-    code = replace(code, "GhUtwoap_iZjAcpPokM" => key)
-
-    return code, strings
-end
-
-function restoreallstrings(code, strings)
-    return foldl(replace, reverse(collect(strings)), init=code)
-end
-
-function stripwhitesinbrackets(lines)
-    code = tostring(lines)
-    brackets = Regex("\\[((?>[^\\[\\]]++|(?0))*)\\]") # complementary brackets
-    # trim spaces inside
-    for m in reverse(collect(eachmatch(brackets, code)))
-        o = m.offset
-        code = code[1:prevind(code,o)] *
-               replace(m.match, " " => "") *
-               code[thisind(code,o+ncodeunits(m.match)):end]
-    end
-    return sameasarg(lines, code)
 end
 
 function processimplieddoloops(code)
@@ -1734,179 +1592,6 @@ function splatprintviews(code::AbstractString)
     return code
 end
 
-function collectformatstrings(code::AbstractString)
-    # https://regex101.com/r/uiP6Is/3
-    rx = r"('\(((?>[\s\S](?!'\(|\)')*|(?1))*?)\)')"mi
-    formatstrings = Dict{String,String}()
-    for m in reverse(collect(eachmatch(rx, code)))
-        str = replace(m.match, mask("''") => "''")
-        key = @sprintf "FMT%06d" mod(hash(str), 2^19)
-        formatstrings[key] = str
-        code = replace(code, m.match => key)
-    end
-    return code, formatstrings
-end
-
-function collectformats(lines::AbstractVector)
-    # https://regex101.com/r/Lopg3O/1
-    rx = r"^\h*(\d+)\h+format\h*(\(((?>[^\(\)]++|(?2))*)\))"i
-    formats = Dict{String,String}()
-    for i in axes(lines,1)
-        if (m = match(rx, lines[i])) != nothing
-            formats[m.captures[1]] = m.captures[3]
-        end
-    end
-    return formats
-end
-
-function convertformat(formatstring)
-    FMT = OrderedDict(
-        r"^\/$"           => "\\n",               # / -> START NEW RECORD
-        r"^(\d*)P$"i      => "",                  # Scale Factor (P): scale from/to mantissa
-        r"^A$"i           => s"%s",               # A -> %s
-        r"^A(\d*)$"i      => s"%\1s",             # A9 -> %9s
-        r"^I(\d*)$"i      => s"%\1i",             # I5 -> %5i
-        r"^I(\d+)\.(\d+)$"i      => s"%0\1i",     # I5.5 -> %05i there can be mistake if \2>\1
-        r"^[ED](\d*\.\d*)$"i => s"%\1E",             # E7.2 -> %7.2E
-        r"^[ED]S(\d*\.\d*)$"i => s"%\1E",            # ES7.2 -> %7.2E ???
-        r"^P[ED](\d*\.\d*)$"i => s"%\1E",            # E7.2 -> %7.2E Scientific format with Scale Factor P
-        r"^P1[ED](\d*\.\d*)$"i => s"%\1E",           # E7.2 -> %7.2E
-        r"^P2[ED](\d*\.\d*)$"i => s"%\1E%\1E",       # E7.2 -> %7.2E ??? is it right?
-        r"^P3[ED](\d*\.\d*)$"i => s"%\1E%\1E%\1E",   # E7.2 -> %7.2E
-        r"^F(\d*\.\d*)$"i => s"%\1F",             # F7.2 -> %7.2F
-        r"^X$"i           => s" ",                # X -> ' '
-        r"^T\d*$"i           => s" ",             # Tx -> ' ' : move to absolute position (column) x
-        r"^([-]?\d+)P$"i  => s"",                 # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
-        r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",   # unenclose ''
-    )
-    # split on tokens and apply repeats
-    format = parseformat(formatstring)
-    # converting
-    for rs in FMT
-        format = map( a->replace(a, rs), format)
-    end
-    return foldl(*, format)
-end
-
-"""
-split format string on tokens and apply repeats
-"""
-function parseformat(formatstring)
-    rep = r"^(\d+)(.*)$"
-    formatparts = splitformat(formatstring)
-
-    format = Vector{String}(undef, 0)
-    for (i,el) in enumerate(formatparts)
-        if occursin(rep, el)
-            num = parse(Int, replace(el, rep=>s"\1"))
-            str = replace(el, rep => s"\2")
-            if occursin(r"\(.*\)", str)
-                str = replace(str,  r"\((.*)\)"=> s"\1")
-                fmt = parseformat(str)
-                [append!(format, fmt) for j=1:num]
-            else
-                [push!(format, str) for j=1:num]
-            end
-        else
-            push!(format, el)
-        end
-    end
-    return format
-end
-
-function insertabsentreturn(code::AbstractString)
-    # find last return if exist. https://regex101.com/r/evx2Lu/8
-    # else insert new one
-    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#?CMMNT\d+\s*|\s*)+)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#?CMMNT\d+\s*|\s*))$"mi
-    if (m = match(rx, code)) != nothing
-        code = replace(code, rx => SS("\\1$(mask("lastreturn"))\\3\\4"))
-    else
-        m = collect(eachmatch(r"(?<=\n|\r)(\h+|)end"mi, code))[end]
-        o = m.offset; l = ncodeunits(m.captures[1])
-        code = code[1:prevind(code,o)] * "$(' '^l)$(mask("lastreturn"))\n" *
-                code[thisind(code,o):end]
-    end
-    # mask all other `return`
-    code = replace(code, Regex("\\breturn\\b") => SS("$(mask("return"))"))
-    return code
-end
-
-function processcommon(code::AbstractString, commons, arrays)
-    if length(commons) == 0
-        #code = replace(code, Regex("\\b$(mask("lastreturn"))\\b") => SS("$(mask("return"))"))
-        return code
-    end
-    #lines = splitonlines(code)
-
-    # @unpack COMMONs before use
-    rx = r"^([ ]*)common\h*\/\h*(\w+)\h*\/\h*"mi
-    for m in reverse(collect(eachmatch(rx, code)))
-        if haskey(commons, m.captures[2])
-            c1 = m.captures[1]; c2 = m.captures[2]
-            s = SS("$(c1)global $c2\n$c1$(mask('@'))unpack $(commons[c2]) = $c2\n$(m.match)")
-            code = replace(code, m.match => s)
-        end
-    end
-
-    # @pack! 'COMMON's back before return
-    packstr = "      $(mask('@'))label Lreturn\n"
-    for k in keys(commons)
-        # arrays don't needed because they should not be reallocated
-        v = split(commons[k], ',')
-        v = v[findall(a->lowercase(a) ∉ map(lowercase,arrays), v)]
-        if length(v) > 0
-            v = foldl((a,b)->a*','*' '*b, v)
-            packstr *= "      $(mask('@'))pack$(mask('!')) $(k) = $(v)\n"
-        end
-    end
-
-    # insert `@pack!` line before final return
-    rx = Regex("^(\\h*\\d+\\h+|\\h+)$(mask("lastreturn"))", "mi")
-    m = match(rx, code)
-    if isempty(strip(m.captures[1])) # without leading label
-        code = replace(code, m.match => SS("$(m.captures[1])\n$packstr      $(mask("lastreturn"))"))
-    else
-        label = strip(m.captures[1])
-        l = length(m.captures[1])
-        code = replace(code, m.match =>
-                        SS(' '^l * "$(mask('@'))label L$(label)\n" *
-                           ' '^l * "$(lstrip(packstr))      $(mask("lastreturn"))"))
-    end
-
-    # replace each RETURN with "@goto Lreturn" and restore last return
-    code = replace(code, Regex("\\b$(mask("return"))\\b") => SS("$(mask('@'))goto Lreturn\\2"))
-    code = replace(code, Regex("\\b$(mask("lastreturn"))\\b") => SS("$(mask("return"))"))
-
-    return code
-end
-
-function processarithmif(code::AbstractString)
-    # https://regex101.com/r/5R0qtY/1/
-    rx = r"\bif\b\h*(\(((?>[^\(\)]++|(?1))*)\))\h*(\d+)\h*,\h*(\d+)\h*,\h*(\d+)"i
-    for m in reverse(collect(eachmatch(rx, code)))
-        line = m.match
-        str = "\n"
-        expr = m.captures[2]
-        L1, L2, L3 = m.captures[3:5]
-        if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
-            cond = expr
-        else
-            cond = @sprintf "CND%s" mod(hash("$(expr)"), 2^16)
-            str *= "      $cond = $expr\n"
-        end
-        str *= "      if $cond < 0\n" *
-               "        goto $L1\n" *
-               "      elseif $cond == 0\n" *
-               "        goto $L2\n" *
-               "      else\n" *
-               "        goto $L3\n" *
-               "      end\n      "
-        o = m.offset; l = ncodeunits(m.match)
-        code = code[1:prevind(code,o)] * str * code[thisind(code,o+l):end]
-    end
-    return code
-end
-
 function processselectcase(code)
     lines = splitonlines(code)
     var = ""
@@ -1916,7 +1601,7 @@ function processselectcase(code)
             expr = replace(lines[i], r"^\h*select\h+case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
             if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
                 var = expr
-                lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SS("\\1" * "#\\2") )
+                lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => s"\\1#\\2" )
             else
                 var = @sprintf "EX%s" mod(hash("$(expr)"), 2^16)
                 lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SS("\\1"*var*" = "*expr*" #\\2") )
@@ -2082,46 +1767,74 @@ function processdatastatement(code::AbstractString, arrays)
     return code
 end
 
-function savespecialsymbols(code::AbstractString)
-    # save '#', '@', '!', "''"
-    # https://regex101.com/r/YrkC9C/1
-    rx = r"('((?>[^']*|(?1))*)'){2,}"m
-    #rx = r"('((?>[^'\n]*|(?1))*)'){2,}"m
-    for m in reverse(collect(eachmatch(rx, code)))
-        str = m.match
-        len = ncodeunits(code)
-        while true
-            str = replace(str, r"('((?>[^']*|(?1))*)')('((?>[^']*|(?1))*)')" => s"'\2GhUtwoap_iZjAcpPokM\4'")
-            #str = replace(str, r"('((?>[^'\n]*|(?1))*)')('((?>[^'\n]*|(?1))*)')" => s"'\2GhUtwoap_iZjAcpPokM\4'")
-            len == (len = ncodeunits(str)) && break
-        end
-        code = replace(code, m.match => str)
-    end
-    # save '!', '"', '\\', '$' inside strings
-    rx = r"('((?>[^'\n]*|(?1))*)')"m
-    for m in reverse(collect(eachmatch(rx, code)))
-        str = replace(m.match, r"!"    => mask('!'))
-        str = replace(str,     r"\""   => mask('"'))
-        str = replace(str,     r"[\\]" => mask('\\'))
-        str = replace(str,     r"\$"   => mask('$'))
-        code = replace(code, m.match => str)
-    end
-    code  = replace(code, r"#" => mask('#'))
-    code  = replace(code, r"@" => mask('@'))
+function processlinescontinuation(code::AbstractString)
+    # fix absent tabs
+    code = replace(code, r"\t?(\n|\r)\t|\t(\n|\r)\t?" => SS("\t\r\t"))
+    #code = replace(code, r"\t?\n\t|\t\n\t?|\t?\r\t|\t\r\t?" => SS("\t\r\t"))
+    # move arithmetic operator from start of continuator to tail of previous line
+    rx = r"(\h*)(#?CMMNT\d{10}|)\t\r\t(\h*|)(\/\/|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)"
+    code = replace(code, rx => SS("\\4\\1\\2\t\r\t\\3"))
     return code
 end
-function restorespecialsymbols(code::AbstractString)
-    # restore saved symbols
-    code = replace(code, mask('#')   => "#"    )
-    code = replace(code, mask('@')   => "@"    )
-    code = replace(code, mask('!')   => "!"    )
-    code = replace(code, mask('$')   => "\\\$" )
-    code = replace(code, mask('"')   => "\\\"" )
-    code = replace(code, mask("''")  => "'"    )
-    code = replace(code, mask("end") => "end"  )
-    code = replace(code, mask('\\')  => "\\\\" )
-    return code
+
+function concatcontinuedlines(code)
+    # may be try `args...`
+    # Note: trailing comments are not allowed here
+    return code isa AbstractVector ? map(a->replace(a, r"\t(\n|\r)\t?|\t?(\n|\r)\t"=>"\t\t"), code) :
+                                     replace(code, r"\t(\n|\r)\t?|\t?(\n|\r)\t"=>"\t\t")
 end
+
+iscontinuedlines(line1, line2) = occursin(r"\t$", line1) || occursin(r"^\t", line2)
+function iscontinuedline(str, i)
+    i = thisind(str, i)
+    while i < ncodeunits(str) && str[i] !='\n'
+        i = nextind(str, i)
+    end
+    if i == ncodeunits(str) || str[prevind(str, i)] != '\t'
+        return false
+    else
+        return true
+    end
+end
+
+
+function concatlines(line1, line2)
+    # comments will be stripped
+    return replace(line1, r"^(.*)(?:#?CMMNT\d{10}|)\t?$"m => s"\1") *
+           replace(line2, r"^\t?(.*)$"m => s"\1")
+end
+
+
+function splitoncomment(code)
+    rx = r"(?=#?CMMNT\d{10})"
+    #rx = r"\h*#.*$"
+    lines = splitonlines(code)
+    comments  = ["" for i=axes(lines,1)]
+    for i in axes(lines,1)
+        (m = match(rx, lines[i])) != nothing && (comments[i] = m.match)
+        lines[i] = replace(lines[i], rx => s"")
+    end
+    # cut out all whitespaces not masked by the comments
+    lines = map(a->replace(a, r"[ ]*(\t|)$" => s"\1"), lines)
+    return lines, comments
+end
+
+stripcomments(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?CMMNT\d{10}"m => "")
+stripcommentsbutlast(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?CMMNT\d{10}(?!\t?$)"m => "")
+
+tostring(code::AbstractVector) =
+    replace(foldl((a,b) -> a*'\n'*b, code),
+            r"\t?(\n|\r)\t|\t(\n|\r)\t?" => "\t\r\t")
+tostring(code::AbstractString) = code
+
+splitonlines(code::AbstractVector) = deepcopy(code)
+splitonlines(code) = split(code, r"\n|\r")
+
+sameasarg(like::AbstractString, code::AbstractString)  = code
+sameasarg(like::AbstractVector, lines::AbstractVector) = lines
+sameasarg(like::AbstractVector, code::AbstractString)  = splitonlines(code)
+sameasarg(like::AbstractString, lines::AbstractVector) = tostring(lines)
+
 
 const multilinereplacements = OrderedDict(
     # Labels
@@ -2133,24 +1846,6 @@ const multilinereplacements = OrderedDict(
     ###r"^([\h]{0,4})([\d]{1,5})(\h*)(.*)"m             => @s_str("      \\1@label L\\2\n     \\3\\4"),
 )
 
-function shapinglabels(code::AbstractString)
-    ###if isfixedformfortran
-    ###    #rx = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"
-    ###    rx = r"(?=^(((\h*)(\d+)(\h+))(\w+|)))(?!^.{5}\S)"m
-    ###else
-        rx = r"^(((\h+|)(\d+)(\h+))(\w+|))"m
-        #rx = r"^(\h+|)(\d+)(\h+)"m
-    ###end
-    for m in reverse(collect(eachmatch(rx, code)))
-        label, tail = m.captures[4], m.captures[6]
-        o = m.offset; l = ncodeunits(m.captures[1])
-        head = ' '^ncodeunits(m.captures[2])
-        str = "$(head)$(mask('@'))label L$label"
-        uppercase(tail) != "CONTINUE" && (str *= "\n$head$tail")
-        code = code[1:prevind(code,o)] * str * code[thisind(code,o+l):end]
-    end
-    return code
-end
 
 const singlewordreplacements = OrderedDict(
     #r"(\bif\b|\belseif\b|\bend\b|\bdo\b|\bwhile\b)"i => s"\L\1",
@@ -2257,6 +1952,7 @@ const singlewordreplacements = OrderedDict(
     #r"(?:\bJ_LEN\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip\1)",
 )
 
+
 # Regex/substitution pairs for replace(). Order matters here.
 const replacements = OrderedDict(
     # Powers use ^ not **
@@ -2334,6 +2030,7 @@ const replacements = OrderedDict(
     r"\h*$" => s"",
 )
 
+
 const headersprocessing = OrderedDict(
     # Reorganise functions and doc strings. This may be very project specific.
     # https://regex101.com/r/DAIHhl/1
@@ -2355,6 +2052,7 @@ const headersprocessing = OrderedDict(
     r"^\h*function\h+"mi => s"function ",
 )
 
+
 # Patterns to remove
 const removal = [
     # Declarations
@@ -2366,6 +2064,248 @@ const removal = [
     # Import statements
     r"\n\s*use\s.*"i,
 ]
+
+
+# Some parsing routines
+
+
+function picktoken(str, i)
+    # may be there should be used `Base.Unicode.category_abbrev()` or `Base.Unicode.category_code()`
+    len = ncodeunits(str)
+    i = thisind(str, i)
+    i > len && return 'e'
+    c = str[i]
+    if isspace(c) && c != '\n'
+        return ' '
+    elseif isdigit(c)
+        return 'd'
+    elseif isletter(c)
+        return 'l'
+    elseif c == '\n' && iscontinuedline(str, i)
+        return ' '
+    elseif c == '\n'
+        return 'e'
+    else
+        return c
+    end
+end
+
+function catchtokenvar(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    start = i
+    while true
+        i = nextind(str, i)
+        if eos() || !(picktoken(str, i) in ('l', 'd', '_'))
+            return start, prevind(str,i)
+        end
+    end
+end
+function catchtokenstring(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    @assert str[i] == '''
+    start = nextind(str, i)
+    while true
+        i = nextind(str, i)
+        eos() && return start, prevind(str, i)
+        if picktoken(str, i) == ''' && picktoken(str, nextind(str, i)) == ''' # double ' -- escaped
+            i = nextind(str, i)
+        elseif picktoken(str, i) == '''
+            return start, prevind(str, i)
+        end
+    end
+end
+function catchbrackets(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    @assert str[i] == '['
+    inbraces = 1
+    start = nextind(str, i)
+    while true
+        i = nextind(str, i)
+        eos() && return start, prevind(str, i)
+        if picktoken(str, i) == '['
+            inbraces += 1
+        elseif inbraces == 1 && picktoken(str, i) == ']'
+            return start, prevind(str, i)
+        elseif picktoken(str, i) == ']'
+            inbraces -= 1
+        end
+    end
+end
+function catchbraces(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    @assert str[i] == '('
+    inbraces = 1
+    start = nextind(str, i)
+    while true
+        i = nextind(str, i)
+        eos() && return start, prevind(str, i)
+        if picktoken(str, i) == '('
+            inbraces += 1
+        elseif inbraces == 1 && picktoken(str, i) == ')'
+            return start, prevind(str, i)
+        elseif picktoken(str, i) == ')'
+            inbraces -= 1
+        end
+    end
+end
+function catchtoken(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    start = i
+    ttype = picktoken(str, i)
+    while true
+        i = nextind(str, i)
+        if eos() || picktoken(str, i) != ttype
+            return start, prevind(str,i)
+        end
+    end
+end
+function catchspaces(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    eos() && return len, prevind(str,len)
+    start = i
+    while !eos() && (isspace(str[i]) && (str[i] != '\n' || iscontinuedline(str, i)))
+        i = nextind(str, i)
+    end
+    return start, prevind(str,i)
+end
+function catchcomment(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    eos() && return len, prevind(str,len)
+    start = i
+    while !eos() && str[i] != '\n'
+        i = nextind(str, i)
+    end
+    return start, prevind(str, i)
+end
+
+function marktoken(str, i)
+    len = ncodeunits(str); i = thisind(str, i)
+    i > len && return len, prevind(str, len), len+1
+    ttype = picktoken(str, i)
+    if ttype == 'l'      # catch keywords and identifiers
+        startpos, endpos = catchtokenvar(str, i)
+        return startpos, endpos, nextind(str, endpos)
+    elseif ttype == '''  # strings
+        startpos, endpos = catchtokenstring(str, i)
+        return startpos, endpos, nextind(str, nextind(str, endpos))
+    elseif ttype == ' '  # catch spaces
+        startpos, endpos = catchspaces(str, i)
+        return startpos, endpos, nextind(str, endpos)
+    elseif ttype == '#'  # catch comment
+        startpos, endpos = catchcomment(str, i)
+        return startpos, endpos, nextind(str, endpos)
+    #elseif ttype == 'd'  # catch integer|float numbers
+    elseif ttype == 'd'  # catch integer number
+        startpos, endpos = catchtoken(str, i)
+        return startpos, endpos, nextind(str, endpos)
+    elseif ttype == '*'  # catch '**' operator
+        startpos, endpos = catchtoken(str, i)
+        return startpos, endpos, nextind(str, endpos)
+    else                 # all other tokens should be singles
+        return i, i, nextind(str, i)
+    end
+end
+
+taketoken(str, i)     =  ( (p1,p2,p3) -> (str[p1:p2], p3) )(marktoken(str, i)...)
+picknexttoken(str, i) =  picktoken(str, marktoken(str, i)[3])
+skiptoken(str, i)     =  marktoken(str, i)[3]
+skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : i
+skipspaces(str, i)    = catchspaces(str, i)[2] + 1
+skipcomment(str, i)   = catchcomment(str, i)[2] + 1
+skipbraces(str, i)    = nextind(str, nextind(str, catchbraces(str, i)[2]))
+skipbrackets(str, i)  = nextind(str, nextind(str, catchbrackets(str, i)[2]))
+isoneline(str)        = !('\n' in str)
+existind(str, i)      = thisind(str, min(max(1,i), ncodeunits(str)))
+
+function skipwhitespaces(str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    eos() && return len+1
+    while !eos() && str[i] == ' '
+        i = nextind(str, i)
+    end
+    return i
+end
+
+"""
+returns the last position of token of requested char
+"""
+function skipupto(c, str, i)
+    eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
+    while true
+        eos() && return len+1
+        if str[i] == ''' != c # skip string
+            i = skiptoken(str, i)
+        elseif str[i] == c == '\n'
+            if iscontinuedline(str, i)
+                i = nextind(str, i)
+            else
+                break
+            end
+        elseif str[i] == '#' != c
+            i = skipcomment(str, i)
+        elseif str[i] == c
+            break
+        else
+            i = nextind(str, i)
+        end
+    end
+    return i
+end
+
+function startoflineind(str, i)
+    i = thisind(str, i)
+    i < 1 && return 0
+    while i>1 && str[prevind(str, i)] !='\n'
+        i = prevind(str, i)
+    end
+    return i
+end
+function endoflineind(str, i)
+    i = thisind(str, i)
+    i > ncodeunits(str) && return ncodeunits(str)+1
+    while i < ncodeunits(str) && str[i] !='\n'
+        i = nextind(str, i)
+    end
+    return i
+end
+thislinerange(str, i) = UnitRange(startoflineind(str, i):endoflineind(str, i))
+function nextlinerange(str, i)
+    i = thisind(str, i)
+    firstip1 = nextind(str, endoflineind(str, i))
+    if firstip1 >= ncodeunits(str)
+        return UnitRange(firstip1:ncodeunits(str))
+    else
+        return UnitRange(firstip1:endoflineind(str, firstip1))
+    end
+end
+function prevlinerange(str, i)
+    i = thisind(str, i)
+    lastim1 = prevind(str, startoflineind(str, i))
+    if lastim1 < 1
+        return UnitRange(1:lastim1)
+    else
+        return UnitRange(startoflineind(str, lastim1):lastim1)
+    end
+end
+
+function continuedlinesrange(str, i)
+    i = thisind(str, i)
+    firsti = startoflineind(str, i)
+    while iscontinuedlines(str[prevlinerange(str, firsti)], str[thislinerange(str, firsti)])
+        firsti = startoflineind(str, prevind(str, firsti))
+    end
+    lasti = endoflineind(str, i)
+    while iscontinuedlines(str[thislinerange(str, lasti)], str[nextlinerange(str, lasti)])
+        lasti = endoflineind(str, nextind(str, lasti))
+    end
+    return UnitRange(firsti, lasti)
+end
+
+function printlines(lines)
+    println()
+    #for l in lines println(l) end
+    for (i,l) in enumerate(lines) print("[$i]: \"$l\"\n") end
+end
 
 function trytoinclude(mask::AbstractString = "*.jl")
     files = glob(mask)
