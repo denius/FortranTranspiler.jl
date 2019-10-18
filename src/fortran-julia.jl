@@ -147,9 +147,9 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     #write("test1.jl", code)
     code, formatstrings = collectformatstrings(code)
     if veryverbose && length(formatstrings) > 0
-        println("FORMATs:")
-        foreach(v -> println(replace(replace(v[2], mask("''")=>"''"), r"\t\r?\t"=>"\n")),
-                reverse(collect(formatstrings)))
+        println("IO FORMAT strings:")
+        foreach(v -> println(replace(replace(v, mask("''")=>"''"), r"\t\r?\t"=>"\n")),
+                reverse(collect(values(formatstrings))))
     end
     #write("test2.jl", code)
 
@@ -560,45 +560,45 @@ function collectvars(lines::AbstractVector)
         r"^\h*integer\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*integer\h*\(\h*KIND\h*=\h*\w+\h*\)\h*(?!.*function)"mi,
         r"^\h*logical\h+(?!.*function)"mi,
-        r"^\h*character\h+"mi,
-        r"^\h*character\*\h+"mi
+        r"^\h*character\s+"mi,
+        r"^\h*character\s*\*\s*"mi
     ]
 
     matched = Vector{String}()
     for rx in patterns
         for l in lines
-            occursin(rx, l) && push!(matched, replace(replace(l, rx => s""), r"\h" => s""))
+            occursin(rx, l) && push!(matched, replace(replace(l, rx => s""), r"\s" => s""))
         end
     end
 
     matchedvars = map(a->replace(a, r"\*\(" => s"("), deepcopy(matched))  # drop '*' in 'character*()'
-    matchedvars = map(a->replace(a, r"\*[\d]+" => s""), matchedvars)      # clean '*7' in 'A*7'
+    matchedvars = map(a->replace(a, r"\*\s*[\d]+" => s""), matchedvars)      # clean '*7' in 'A*7'
     matchedvars = map(a->replace(a, r"(\(((?>[^\(\)]++|(?1))*)\))" => s""), matchedvars)    # clean braces
     matchedvars = map(a->replace(a, r"(\/((?>[^\/]*|(?1))*)\/)" => s""), matchedvars)  # clean /.../ -- statics
 
     # catch only arrays names
     for i in 1:length(matched)
-        matched[i] = replace(matched[i], r"\*([\d]+)" => s"(\1)") # character A*7 -> A(7)
+        matched[i] = replace(matched[i], r"\*\s*([\d]+)" => s"(\1)") # character A*7 -> A(7)
         matched[i] = replace(matched[i], r"(\(((?>[^\(\)]++|(?1))*)\))" => s"()")   # clean inside braces
         # https://regex101.com/r/weQOSe/4
         matched[i] = replace(matched[i], r"(\/((?>[^\/]*|(?1))*)\/)" => s"")   # clean /.../ -- statics
         matched[i] = replace(matched[i], r"[^(),]+," => s"")      # drop non-arrays (without braces)
         matched[i] = replace(matched[i], r",[^(),]+$"m => s"")    # drop last non-array (without braces)
         matched[i] = replace(matched[i], r"^[^(),]+$"m => s"")    # drop single non-array (without braces)
-        matched[i] = replace(matched[i], r"\*\(" => s"(")         # drop '*' in character*()
+        matched[i] = replace(matched[i], r"\*\s*\(" => s"(")         # drop '*' in character*()
     end
 
     # add undoubted arrays
     # Note: to any fortran 'CHARACTER' can be applied get index operator: 'C(:1)'
-    patterns = [r"^\h*.*dimension\h*\(.+\)\h*::\h*"mi,
-               r"^\h*allocatable\h+"mi,
-               r"^\h*character\h+"mi,
-               r"^\h*character\*\h+"mi,
-               r"^\h*character\*\d+\h+"mi,
-               r"^\h*character\(\d+\)\h*"mi,
-               r"^\h*character\(\*\)\h*"mi,
-               r"^\h*character\*\(\*\)\h*"mi,
-               r"^\h*character\*\([\h\w_*+-]+\)\h*"mi ]
+    patterns = [r"^\h*.*dimension\s*\(.+\)\s*::\s*"mi,
+               r"^\h*allocatable\s+"mi,
+               r"^\h*character\s+"mi,
+               r"^\h*character\s*\*\s*"mi,
+               r"^\h*character\s*\*\d+\s+"mi,
+               r"^\h*character\s*\(\d+\)\s*"mi,
+               r"^\h*character\s*\(\*\)\s*"mi,
+               r"^\h*character\s*\*\s*\(\*\)\s*"mi,
+               r"^\h*character\s*\*\s*\([\h\w_*+-]+\)\s*"mi ]
     for rx in patterns
         for l in lines
             if occursin(rx, l)
@@ -617,7 +617,7 @@ function collectvars(lines::AbstractVector)
         length(l) > 0 && append!(arrays, split(l, ","))
     end
     for i in 1:length(arrays)
-        arrays[i] = replace(arrays[i], r"^(\w+)\(.*\)$"m => s"\1") # drop braces
+        arrays[i] = replace(arrays[i], r"\(\)" => s"") # drop braces
     end
     arrays = unique(arrays)
 
@@ -812,7 +812,7 @@ function processiostatements(code::AbstractString, formatstrings)
         elseif length(label) > 0 && haskey(formatstrings, label)
             fmt = replace(replace(formatstrings[label], r"^'\((.*)\)'$" => s"\1"), mask("''")=>"'")
         elseif length(label) > 0
-            @warn("delayed format conversion call with $label")
+            @warn("IO format string in variable $label")
         else
             formats[@sprintf "FMT%06d" mod(hash(fmt), 2^19)] = fmt
         end
@@ -864,7 +864,7 @@ function parsereadwrite(str, pstn)
                 cmdtaken = true
                 pstn = skipspaces(str, pstn)
             else
-                # that is not an 'READ/WRITE' statement
+                # it is not an 'READ/WRITE' statement
                 return 0, "", "", "", "", "", "", ""
             end
         elseif cmdtaken && inparams && ttype == 'l'
@@ -872,17 +872,19 @@ function parsereadwrite(str, pstn)
             LEX = uppercase(lex)
             if LEX == "FMT" && picktoken(str, skipspaces(str, pstn)) == '='
                 label, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
-            elseif (LEX == "ERR" || LEX == "END") && picktoken(str, skipspaces(str, pstn)) == '='
-                val, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
+            elseif (LEX == "ERR" || LEX == "END" || LEX == "REC") &&
+                   picktoken(str, skipspaces(str, pstn)) == '='
+                val, pstn = taketokenexpr(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
+                #val, pstn = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pstn))))
                 params[uppercase(lex)] = val
             elseif nextparam == 1
                 IU = lex
             else
-                # this is the format string in variable (or just saved)
+                # this is the format string in the variable
                 formatvar = lex
-                occursin(r"^FMT\d{6}$", lex) ||
-                @warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
-                      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, pstn)]))\"\n")
+                #occursin(r"^FMT\d{6}$", lex) ||
+                #@warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
+                #      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, pstn)]))\"\n")
             end
         elseif cmdtaken && inparams && ttype == 'd' && nextparam == 1
             IU, pstn = taketoken(str, pstn)
@@ -1377,7 +1379,8 @@ function processconditionalgotos(code)
             ifexpr *= "if ($(var) .eq. $(g)) then\n$(head)    $(mask('@'))goto L$(g)\n$(head)else"
         end
         ifexpr *= "\n$(head)    $(mask('@'))error(\"non-exist label " *
-                  "$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
+                  "$(var)=$(mask('"'))\$($(var))$(mask('"')) " *
+                  #"$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
                   "in goto list\")\n$(head)end$(tail)\n"
         code = code[1:prevind(code,r[1])] * ifexpr * code[nextind(code,r[end]):end]
     end
@@ -1395,7 +1398,7 @@ function processifstatements(code)
         length(afterthencomment) > 0 && (afterthencomment = " " * afterthencomment)
         #@show o, iflength, ifcond, ifexec, afterthencomment
         if wothen == true
-            str = s1 * s2 * "if_iZjAcpPokM (" * strip(ifcond) * ")"
+            str = s1 * s2 * "$(mask("if")) (" * strip(ifcond) * ")"
             if isoneline(ifcond) && isoneline(ifexec)
                 # insert "end" before comment or at tail
                 str *= replace(ifexec, r"^\h*([^#]*)\h*(#.*|)$" => s" \1 end \2")
@@ -1403,16 +1406,16 @@ function processifstatements(code)
                 str *= ifexec * "\n" * " "^length(s1) * "end "
             end
         elseif wothen == false && picktoken(ifcond, skipwhitespaces(ifcond, 1)) in ('#','\n',' ')
-            str = s1 * s2 * "if_iZjAcpPokM (" * ifcond * ")" * afterthencomment
+            str = s1 * s2 * "$(mask("if")) (" * ifcond * ")" * afterthencomment
         elseif wothen == false
-            str = s1 * s2 * "if_iZjAcpPokM " * strip(ifcond) * afterthencomment
+            str = s1 * s2 * "$(mask("if")) " * strip(ifcond) * afterthencomment
         else
             str = ""
         end
         code = code[1:prevind(code,o)] * str * code[thisind(code,o+iflength):end]
     end
 
-    return replace(code, r"if_iZjAcpPokM" => "if")
+    return replace(code, Regex("$(mask("if"))") => "if")
 end
 
 function parseifstatement(str, pstn)
@@ -1995,7 +1998,7 @@ const replacements = OrderedDict(
     # include ESCAPEDSTR
     r"^(\s*)INCLUDE\h+([\w]+)$"mi => s"\1include(\2)",
     # Replace do LABEL ... -> do ...
-    r"FOR\h+(?:\d+)(\h+.*)$" => s"for\1",
+    r"for\h+(?:\d+)(\h+.*)$" => s"for\1",
     # Replace do while -> while
     r"DO\h+WHILE\h*"i => s"while ",
     r"^(\h*)\bDO\b\h*$"i => s"\1while true",
@@ -2222,6 +2225,20 @@ function marktoken(str, i)
     end
 end
 
+"""
+take symbols till end of expression: ',' or ')'
+"""
+function taketokenexpr(str, i)
+    eos() = i>len; len = ncodeunits(str); i1 = i = thisind(str, i)
+    eos() && return str[len:len-1], len+1
+    while true
+        picktoken(str, skipspaces(str,i)) in (',', ')') && break
+        i = skiptoken(str, skipspaces(str,i))
+        eos() && break
+    end
+    return str[i1:prevind(str,i)], i
+end
+
 taketoken(str, i)     =  ( (p1,p2,p3) -> (str[p1:p2], p3) )(marktoken(str, i)...)
 picknexttoken(str, i) =  picktoken(str, marktoken(str, i)[3])
 skiptoken(str, i)     =  marktoken(str, i)[3]
@@ -2236,7 +2253,7 @@ existind(str, i)      = thisind(str, min(max(1,i), ncodeunits(str)))
 function skipwhitespaces(str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     eos() && return len+1
-    while !eos() && (str[i] == ' ' || str[i] == '\t' || str[i] == '\r')
+    while !eos() && str[i] in (' ', '\t', '\r')
         i = nextind(str, i)
     end
     return i
