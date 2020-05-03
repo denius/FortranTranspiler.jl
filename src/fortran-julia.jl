@@ -86,7 +86,7 @@ const usage =
         -n, --dry-run      Make processing but don't write output '.jl' files.
 """
 
-function main(args)
+function main(args = String[])
     args, fnames = parseargs(args)
     case = args["--uppercase"] ? uppercase :
            args["--lowercase"] ? lowercase : identity
@@ -835,10 +835,12 @@ function processiostatements(code::AbstractString, formatstrings)
         iolength, io, label, fmt, pmt, paramsstr, args = parsereadwrite(code, o)
         #@show iolength, io, label, fmt, pmt, paramsstr, args
         if length(label) > 0 && haskey(formats, label)
-            fmt = replace(formatstrings[formats[label]], mask("''") => "'")
+            fmt = formatstrings[formats[label]]
+            #fmt = replace(formatstrings[formats[label]], mask("''") => "'")
             #formats[label] = fmt
         elseif length(label) > 0 && haskey(formatstrings, label)
-            fmt = replace(replace(formatstrings[label], r"^'\((.*)\)'$" => s"\1"), mask("''")=>"'")
+            fmt = replace(formatstrings[label], r"^'\((.*)\)'$" => s"\1")
+            #fmt = replace(replace(formatstrings[label], r"^'\((.*)\)'$" => s"\1"), mask("''")=>"'")
         elseif length(label) > 0
             @warn("IO format string in variable $label")
         else
@@ -2402,4 +2404,4 @@ function trytoinclude(mask::AbstractString = "*.jl")
     return nothing
 end
 
-main(ARGS)
+isinteractive() || main(ARGS)
