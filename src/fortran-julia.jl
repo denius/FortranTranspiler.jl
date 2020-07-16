@@ -222,7 +222,8 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     code = replace(code, r"^[ ]{0,5}\t"m => "      ")
     code = replace(code, r"\t"m => "  ")
 
-    isfixedformfortran = !occursin(r"^[^cC*!\n][^\n]{0,3}[^\d\h\n]"m, code)
+    isfixedformfortran = !occursin(r"^[^cC*!#\n][^\n]{0,3}[^\d\h\n]"m, code)
+    @debug "isfixedformfortran = $isfixedformfortran"
 
     # replace some symbols with the watermarks
     code = savespecialsymbols(code)
@@ -236,11 +237,11 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
     # convert lines continuations marks to "\t\r\t"
     code = replacecontinuationmarks(code, isfixedformfortran)
+    #write("test1.jl", code)
 
     # some fixes
     code = foldl(replace, collect(repairreplacements), init=code)
 
-    #write("test1.jl", code)
     code, formatstrings = collectformatstrings(code)
     if veryverbose && length(formatstrings) > 0
         println("IO FORMAT strings:")
@@ -253,13 +254,15 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
     # mark lines of code occupied by each subroutine
     subs, subnames = markbysubroutine(alllines)
+    subnames[1] == "" && (subs[2] += 1; prepend!(alllines, ("      PROGRAM",)))
 
     # converted code will be stored in string `result`
-    result = "using FortranFiles\nusing OffsetArrays\nusing Parameters\nusing Printf"
+    result = "using FortranFiles\nusing OffsetArrays\nusing Parameters\nusing Printf\n"
 
     for i = 1:length(subs)-1
 
         code = tostring(view(alllines, subs[i]:subs[i+1]-1))
+        #write("test0.jl", code)
 
         veryverbose && println()
         verbose && print("[$(subs[i]):$(subs[i+1]-1)] $(strip(subnames[i]))\n")
@@ -278,7 +281,9 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         veryverbose && length(commons) > 0 && println("    COMMONs : $commons")
 
         # replace array's brackets with square braces
+        #write("test1.jl", code)
         code = replacearraysbrackets(code, arrays)
+        #write("test2.jl", code)
 
         # READ and WRITE statements
         code = processiostatements(code, formatstrings)
@@ -292,7 +297,6 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
         code = processcommon(code, commons, arrays)
 
-        # comment out all vars declarations
         code, commentstrings = commentoutdeclarations(code, commentstrings)
 
         code = processdostatements(code)
@@ -476,7 +480,7 @@ function replacecontinuationmarks(code::AbstractString, fortranfixedform)
 
     code = replace(code, r"(?:&)([ ]*(?:#?CMMNT\d{10}|))(?:\n|\t\r\t)"m => SS("\\1\t\r\t"))
     code = replace(code, r"(?:\t\r\t|\n)([ ]*)&"m => SS("\t\r\t\\1 "))
-    fortranfixedform && (code = replace(code, r"\n[ ]{5}\S"m => SS("\t\r\t      ")))
+    fortranfixedform && (code = replace(code, r"[\n\r][ ]{5}\S"m => SS("\t\r\t      ")))
 
     # also include empty and commented lines inside the block of continued lines
     # free-form
@@ -543,13 +547,11 @@ function collectformats(lines::AbstractVector)
 end
 
 function markbysubroutine(code)
-    #lines, comments = splitoncomment(code)
     lines = splitonlines(code)
     lines .= stripcomments.(lines)
 
     # is there should be \s?
     rx = r"^(\h*)((?:[\w*\h]+\h+)function|(?:recursive\h+|)subroutine|program|block\h*data|module)\h*.*$"mi
-    #rx = r"^(\h*)((?:(?:\w+\h+)+\h+)*function|(?:recursive\h+|)subroutine|program|block\h*data|module)\h*.*$"mi
     marked = Vector{Int}(undef, 0)
     names  = Vector{String}(undef, 0)
     for i in axes(lines,1)
@@ -557,6 +559,12 @@ function markbysubroutine(code)
             push!(marked, i)
             push!(names, strip(m.match))
         end
+    end
+
+    # file without any program or subroutine keyword
+    if length(marked) == 0
+        push!(marked, 1)
+        push!(names, "")
     end
 
     rx = r"^\h*(end\h*(?!do|if)|\bcontains\b)"i
@@ -604,6 +612,7 @@ function collectvars(lines::AbstractVector)
     # strip unnecessaries
     strips = OrderedDict(
         r"^\h+"                         => s"",
+        r"\h+$"                         => s"",
         r"\h+"                          => s" ",
         r"(\W)\h+(\W)"                  => s"\1\2",  # "* ("   => "*("
         r"([^\w)])\h+(\w)"              => s"\1\2",  # ", A"   => ",A"
@@ -616,7 +625,7 @@ function collectvars(lines::AbstractVector)
     end
 
     f90decl = r"::"
-    fdecl = Regex("^\\bcommon\\b|"    *
+    fdecl = Regex(#"^\\bcommon\\b|"    *
                   "^\\bdimension\\b|" *
                   "^\\binteger\\b|"   *
                   "^\\blogical\\b|"   *
@@ -634,8 +643,6 @@ function collectvars(lines::AbstractVector)
             push!(matched, l)
         end
     end
-    @debug "matched = \"$matched\""
-    @debug "matched90 = \"$matched90\""
 
     #vars    = Dict{String, VarDescription}()
     vars    = Dict{String, NamedTuple{(:decl,:name,:dim,:val),Tuple{String,String,String,String}}}()
@@ -655,9 +662,13 @@ function collectvars(lines::AbstractVector)
 
     for (k,v) in vars
         length(v.dim) == 0 ? push!(scalars, k) : push!(arrays, k)
-        occursin(rxch, v.decl) && push!(strings, k)
+        occursin(r"^\bCHARACTER\b"i, v.decl) && push!(strings, k)
+        #occursin(rxch, v.decl) && push!(strings, k)
     end
+    # in FORTRAN even single CHARACTER can be accessed by index:
+    # `CH(:1)` or `CH(1:1)` thus any CHARACTER variable is an array
     append!(arrays, strings)
+
     @debug "scalars = \"$scalars\""
     @debug "arrays  = \"$arrays\""
     @debug "strings = \"$strings\""
@@ -669,9 +680,6 @@ function collectvars(lines::AbstractVector)
                    dim=vars[s].dim, val=restorestrings(vars[s].val, savedstrings))
     end
 
-    @assert "" ∉ arrays
-    @assert "" ∉ scalars
-    @assert "" ∉ strings
     return scalars, arrays, strings, vars
 end
 
@@ -680,11 +688,11 @@ function parsevardeclstatement(line, vars)
     # INTEGER X(10),Y(*),Z(2,*),I
     # CHARACTER*(*) S(2)
     # CHARACTER*8 S/'12345678'/,R
-    # CHARACTER JBCMPZ*2/'AB'/
+    # CHARACTER JBCMPZ*2/'AB'/,R2*(*)
 
     pstn      = 1 # PoSiTioN
 
-    @debug "line=\"$line\""
+    @debug "parcedline = \"$line\""
 
     decltype0, line = split(line, ' ', limit=2)
 
@@ -869,6 +877,9 @@ function collectlabels(lines::AbstractVector)
             foreach(l->push!(gotolabels, l), labels)
         end
     end
+
+    @debug "dolabels: \"$dolabels\""
+    @debug "gotolabels: \"$gotolabels\""
     return dolabels, gotolabels
 end
 
@@ -902,6 +913,16 @@ function replacearraysbrackets(code::AbstractString, arrays)
 
     # fix uncompleted ranges in square braces like [1:] and [:1]
     brackets = r"\[((?>[^\[\]]++|(?0))*)\]" # complementary brackets
+
+    # trim line breaks after ':'
+    rx = r":\s*(#CMMNT\d{10}|)\t\r\t\h*"
+    for m in reverse(collect(eachmatch(brackets, code)))
+        if occursin(rx, m.match)
+            o = m.offset
+            code = code[1:o-1] * replace(m.match, rx => s":") * code[o+length(m.match):end]
+        end
+    end
+
     # trim spaces around ':'
     rx = r"\[(.*|)([ ]+|):([ ]+|)(.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
@@ -910,6 +931,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
             code = code[1:o-1] * replace(m.match, rx => s"[\1:\4]") * code[o+length(m.match):end]
         end
     end
+
     # uppend with "end"
     rx = r"\[(.*[^,]):(,.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
@@ -919,6 +941,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
                    code[o+length(m.match):end]
         end
     end
+
     # prepend with '1'
     rx = r"\[:([^,].*)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
@@ -927,6 +950,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
             code = code[1:o-1] * replace(m.match, rx => s"[1:\1]") * code[o+length(m.match):end]
         end
     end
+
     return code
 end
 
@@ -1328,12 +1352,12 @@ function commentoutdeclarations(code, commentstrings)
         r"^\h*character(?!.*parameter).*::"mi,
         r"^\h*character\h*$"mi,
         r"^\h*character\h+(?!.*function)"mi,
+        r"^\h*character\h*\*[0-9]+\h+(?!.*function)"mi,
         r"^\h*character\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
-        r"^\h*character\*\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
         r"^\h*character\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
-        r"^\h*character\*\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
-        r"^\h*character\*\h*\([\h\w_*+-]+\)\h*(?!.*function)"mi,
-        r"^\h*character\*[0-9]+\h+(?!.*function)"mi,
+        r"^\h*character\h*\*?\h*\(\h*\*\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\h*\*?\h*\(\h*\d+\h*\)\h*(?!.*function)"mi,
+        r"^\h*character\h*\*?\h*\([\h\w_*+-]+\)\h*(?!.*function)"mi,
         r"^\h*external\h+"mi,
         r"^\h*logical(?!.*parameter).*::"mi,
         r"^\h*logical\h*$"mi,
@@ -1342,7 +1366,9 @@ function commentoutdeclarations(code, commentstrings)
         r"^\h*entry\h+.*"mi,
         r"^\h*save\h+.*"mi,
         r"^\h*equivalence\h+.*"mi,
-        r"^\h+\d+\h+format\h*\("mi
+        r"^\h+\d+\h+format\h*\("mi,
+        # Import statements
+        r"^\h*use\h.*"mi,
     ]
 
     for rx in patterns
@@ -1727,11 +1753,11 @@ function processimplieddoloops(code)
     W(s) = replace("$s", " " => "")
 
     # should be:
-    # `A = [(real(I), I=3, 5)]` => `A = [real(I) for I=3, 5]`
-    # not released: `/(real(I), I=3, 5)/` => `[real(I) for I=3, 5]`
+    # `A = [(real(I), I=3, 5)]`   => `A = [real(I) for I=3, 5]`
+    # TODO: not released: `/(real(I), I=3, 5)/` => `[real(I) for I=3, 5]`
     # `(WRITE(*,*)(A(I), I=3, 5)` => `print(view(A, 3:5)...)` # splatting in splatprintviews()
-    # `(READ(*,*)(A(I), I=3, 5)` => `READ(view(A, 3:5))`
-    # `DATA (A(I), I=3, 5)` => `DATA view(A, 3:5)`
+    # `(READ(*,*)(A(I), I=3, 5)`  => `READ(view(A, 3:5))`
+    # `DATA (A(I), I=3, 5)`       => `DATA view(A, 3:5)`
 
     # https://pages.mtu.edu/~shene/COURSES/cs201/NOTES/chap08/io.html
     # ( item-1, item-2, ...., item-n, DO-var = initial, final, step )
@@ -2166,6 +2192,7 @@ const trivialreplacements = OrderedDict(
     r"\bdfloat\b\h*\("i => "float(",
     r"\bcmplx\b\h*\("i => "ComplexF32(", # ?
     r"\bdcmplx\b\h*\("i => "complex(",
+    r"\bceiling\b\h*\("i => "ceil(Int,",
     r"\bkind\b\h*\("i => "sizeof(",
     r"\brand\b\h*\(\)"i => "rand()",
     # https://regex101.com/r/whrGry/2
@@ -2293,8 +2320,6 @@ const removal = [
     r"\n\s*external\s.*"i,
     r"\n\s*intrinsic\s.*"i,
     r"\n\s*contains\s.*"i,
-    # Import statements
-    r"\n\s*use\s.*"i,
 ]
 
 
