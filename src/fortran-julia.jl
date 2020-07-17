@@ -103,11 +103,11 @@ function main(args = String[])
         result = FortranToJulia.convertfromfortran(code, casetransform=case, quiet=args["--quiet"],
                                                    verbose=args["--verbose"],
                                                    veryverbose=args["--veryverbose"])
-        write(splitext(fname)[1] * ".jl", result)
+        args["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
         if args["--formatting"]
             try
                 result = JuliaFormatter.format_text(result, margin = 192)
-                write(splitext(fname)[1] * ".jl", result)
+                args["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
             catch
                 @info("$(splitext(fname)[1] * ".jl")\nFORMATTING IS NOT SUCCESSFULL\n")
             end
@@ -162,16 +162,18 @@ function parseargs(lines)
         popfirst!(lines)
     end
 
+    rxfortranfiles = (r"\.for$"i, r"\.f$"i, r"\.f77$"i, r"\.f90$"i)
+
     flist = Vector{String}()
-    for f in fnames
-        isfile(f) && push!(flist, f)
-        if isdir(f)
-            for mask in ("*.for", "*.f", "*.f77", "*.f90")
-                append!(flist, glob(joinpath(f, mask)))
-                append!(flist, glob(joinpath(f, uppercase(mask))))
+    for fname in fnames
+        isfile(fname) && push!(flist, normpath(fname))
+        if isdir(fname)
+            for (root, dirs, files) in walkdir(fname), f in files
+                any(map(r->occursin(r,f), rxfortranfiles)) && append!(flist, (joinpath(root, f),))
             end
         end
     end
+    unique!(flist)
 
     if args["--verbose"] == 2 || args["-v"] == 2 || args["-vv"] == 1
         args["--veryverbose"] = args["--verbose"] = args["-vv"] = args["-v"] = true
@@ -551,7 +553,8 @@ function markbysubroutine(code)
     lines .= stripcomments.(lines)
 
     # is there should be \s?
-    rx = r"^(\h*)((?:[\w*\h]+\h+)function|(?:recursive\h+|)subroutine|program|block\h*data|module)\h*.*$"mi
+    rx = r"^(\h*)((?:[\w*\h]+\h+)(?!\bend\b\h+)function|(?:recursive\h+|)subroutine|program|block\h*data|module(?!\h*procedure))\h*.*$"mi
+    #rx = r"^(\h*)((?:[\w*\h]+\h+)function|(?:recursive\h+|)subroutine|program|block\h*data|module(?!\h*procedure))\h*.*$"mi
     marked = Vector{Int}(undef, 0)
     names  = Vector{String}(undef, 0)
     for i in axes(lines,1)
@@ -963,6 +966,40 @@ function stripwhitesinbrackets(code::AbstractString)
                replace(m.match, " " => "") *
                code[thisind(code,o+ncodeunits(m.match)):end]
     end
+    return code
+end
+
+function convertstrings(code::AbstractString)
+    # `S = 'A'`       => `S[1] = 'A'; S[2:end] .= 0`
+    # `S[1:2] = 'A'`  => `S[1] = 'A'; S[2] = ' '`
+    # `S = "ABC"`     => `S .= collect("ABC")[1:min(length(S),length("ABC"))]`
+    # ###`S[2] = "ABC"`  => `S[2] = collect("ABC")[1]`
+    # `S[:2] = "ABC"` => `S[1:2] .= collect("ABC")[1:2]`
+    # `S = "ABC"`     => `S .= collect("ABC")`
+    # `S = 'A'`       => `S .= 'A'`
+    # `S = 'A'`       => `S .= 'A'`
+    #
+
+    # convert `A = "ABC"` into `A .= collect("ABC")`
+    # capture string https://regex101.com/r/KTFUCj/3
+    rx = r"(\w+\s*)=(\s*)(\"(?:[^\"\\]|\\.)*\")"
+    for m in reverse(collect(eachmatch(rx, code)))
+        o = m.offset
+        code = code[1:prevind(code,o)] *
+               replace(m.match, rx => SS("\1.=\2collect(\3)")) *
+               code[thisind(code,o+ncodeunits(m.match)):end]
+    end
+
+    # convert `A[2] = "ABC"` into `A[2] = collect("ABC")[1]`
+    # capture string https://regex101.com/r/KTFUCj/3
+    rx = r"(\w+\[\w+\]\s*)=(\s*)(\"(?:[^\"\\]|\\.)*\")"
+    for m in reverse(collect(eachmatch(rx, code)))
+        o = m.offset
+        code = code[1:prevind(code,o)] *
+               replace(m.match, rx => SS("\1=\2collect(\3)[1]")) *
+               code[thisind(code,o+ncodeunits(m.match)):end]
+    end
+
     return code
 end
 
