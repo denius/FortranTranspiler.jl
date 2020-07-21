@@ -39,25 +39,29 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 
 module FortranToJulia
 
+export convertfromfortran
+
+using Compat
 using DataStructures
 using Espresso
 using JuliaFormatter
 using Printf
 
+
 # module for CLI running
 module CLI
 
 using ..FortranToJulia
+using Compat
 using DataStructures
 using Glob
 using Printf
 
 const usage =
 """
-    This julia script converts the fortran-77, -90 code into julia.
+    This julia script converts the fortran77 and partly fortran90 code into julia.
     It uses both parsing and naive regex replacements to do as much as possible,
     but the output may need further refinement.
-    Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 
     Usage:
         fortran-julia.jl -h | --help
@@ -65,9 +69,9 @@ const usage =
         fortran-julia.jl [--lowercase | --uppercase] ... [--] .
 
     Samples:
-        fortran-julia.jl *.f*
-        fortran-julia.jl **/*.[fF]*
         fortran-julia.jl .
+        fortran-julia.jl somefile.f somedir
+        fortran-julia.jl *.f* *.F*
 
     Options:
         -h, --help         Show this screen.
@@ -77,37 +81,40 @@ const usage =
         -v, --verbose      Be more verbose.
         --uppercase        Convert all identifiers to upper case.
         --lowercase        Convert all identifiers to lower case.
-        --greeks           Replace the greeks letters names thats starts the vars names
-                           with corresponding unicode symbols, like DELTA1 -> δ1.
-        --subscripts       Replace tail suffixes in vars names like SOMEVAR_?
-                           with unicode subscripts, if exist.
-        --                 The rest of the args is only the filenames.
+        --greeks           Replace the greek letter names thats starts the var names
+                           with the corresponding unicode symbol, like DELTA1 -> δ1.
+        --subscripts       Replace tail suffixes in vars names with unicode subscripts
+                           like SOMEVAR_1 => SOMEVAR₁, if exist. Can be applied few times.
+        --greeksubscripts  SOMEVAR_gamma => SOMEVARᵧ
+        --                 The rest of the args is only the filenames and dirs.
         --formatting       Try to format with JuliaFormatter package.
         --dontfixcontinue  Do not try to insert ommited CONTINUE in the ancient fortran DO LABEL loops.
-        --returnnothing
         --packarrays
         --strings
         --single           Evaluate 1.0E0 as Float32. Double precision in fortran is 1.0D0
         --omitimplicit     Omit implicit scalars initialization.
-        -n, --dry-run      Make the processing but don't write output '.jl' files.
+        -n, --dry-run      Make the processing but don't write output \".jl\" files.
+
+    Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 """
 
 function main(args = String[])
-    args, fnames = parseargs(args)
-    case = args["--uppercase"] ? uppercase :
-           args["--lowercase"] ? lowercase : identity
+    opts, fnames = parseargs(args)
+    case = opts["--uppercase"] ? uppercase :
+           opts["--lowercase"] ? lowercase : identity
 
     for fname in fnames
-        args["--verbose"] && print("$(fname):\n")
+        opts["--verbose"] && print("$(fname):\n")
         code = open(fname) |> read |> String
-        result = FortranToJulia.convertfromfortran(code, casetransform=case, quiet=args["--quiet"],
-                                                   verbose=args["--verbose"],
-                                                   veryverbose=args["--veryverbose"])
-        args["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
-        if args["--formatting"]
+        result = convertfromfortran(code, casetransform=case, quiet=opts["--quiet"],
+                                    verbose=opts["--verbose"], veryverbose=opts["--veryverbose"],
+                                    greeks=opts["--greeks"], subscripts=opts["--subscripts"],
+                                    greeksubscripts=opts["--greeksubscripts"])
+        opts["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
+        if opts["--formatting"]
             try
                 result = JuliaFormatter.format_text(result, margin = 192)
-                args["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
+                opts["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
             catch
                 @info("$(splitext(fname)[1] * ".jl")\nFORMATTING IS NOT SUCCESSFULL\n")
             end
@@ -116,50 +123,51 @@ function main(args = String[])
     return nothing
 end
 
-function parseargs(lines)
+function parseargs(args)
 
-    function therecanbeonlyone!(args, v1, v2)
-        args[v1] = args[v1] || args[v2]
-        delete!(args, v2)
+    function therecanbeonlyone!(opts, v1, v2)
+        opts[v1] = opts[v1] || opts[v2]
+        delete!(opts, v2)
     end
 
     fnames = Vector{String}()
-    args = OrderedDict{String, Any}()
-    args["--quiet"]         = args["-q"]  = false
-    args["--verbose"]       = args["-v"]  = false
-    args["--veryverbose"]   = args["-vv"] = false
-    args["--dry-run"]       = args["-n"]  = false
-    args["--uppercase"]     = false
-    args["--lowercase"]     = false
-    args["--greeks"]        = false
-    args["--subscripts"]    = false
-    args["--formatting"]    = false
-    args["--returnnothing"] = false
-    args["--packarrays"]    = false
-    args["--strings"]       = false
-    #args["--"]  = false
+    opts = OrderedDict{String, Any}()
+    opts["--quiet"]           = opts["-q"]  = false
+    opts["--verbose"]         = opts["-v"]  = false
+    opts["--veryverbose"]     = opts["-vv"] = false
+    opts["--dry-run"]         = opts["-n"]  = false
+    opts["--uppercase"]       = false
+    opts["--lowercase"]       = false
+    opts["--greeks"]          = false
+    opts["--greeksubscripts"] = false
+    opts["--subscripts"]      = 0
+    opts["--formatting"]      = false
+    #opts["--returnnothing"]   = false
+    opts["--packarrays"]      = false
+    opts["--strings"]         = false
+    #opts["--"]  = false
 
-    while length(lines) > 0
-        if first(lines) == "--help" || first(lines) == "-h"
+    while length(args) > 0
+        if first(args) == "--help" || first(args) == "-h"
             println("fortran-julia.jl:\n$usage\n")
             exit(0)
-        elseif haskey(args, first(lines))
-            args[first(lines)] += 1
-            popfirst!(lines)
-        elseif first(args) == "--" # end of options
-            popfirst!(lines)
+        elseif haskey(opts, first(args))
+            opts[first(args)] += 1
+            popfirst!(args)
+        elseif first(opts) == "--" # end of options
+            popfirst!(args)
             break
-        elseif occursin(r"^--\w\w+$", first(lines)) || occursin(r"^-\w$", first(lines))
-            @error("unrecognized option in ARGS: '$(first(lines))'")
+        elseif occursin(r"^--\w\w+$", first(args)) || occursin(r"^-\w$", first(args))
+            @error("unrecognized option in opts: '$(first(args))'")
             exit(0)
         else
-            push!(fnames, first(lines))
-            popfirst!(lines)
+            push!(fnames, first(args))
+            popfirst!(args)
         end
     end
-    while length(lines) > 0
-        push!(fnames, first(lines))
-        popfirst!(lines)
+    while length(args) > 0
+        push!(fnames, first(args))
+        popfirst!(args)
     end
 
     rxfortranfiles = (r"\.for$"i, r"\.f$"i, r"\.f77$"i, r"\.f90$"i)
@@ -175,24 +183,24 @@ function parseargs(lines)
     end
     unique!(flist)
 
-    if args["--verbose"] == 2 || args["-v"] == 2 || args["-vv"] == 1
-        args["--veryverbose"] = args["--verbose"] = args["-vv"] = args["-v"] = true
+    if opts["--verbose"] == 2 || opts["-v"] == 2 || opts["-vv"] == 1
+        opts["--veryverbose"] = opts["--verbose"] = opts["-vv"] = opts["-v"] = true
     end
-    for (k,v) in args
-        !isa(args[k], Bool) && args[k] == 1 && (args[k] = true)
+    for (k,v) in opts
+        !isa(opts[k], Bool) && opts[k] == 1 && (opts[k] = true)
     end
 
-    therecanbeonlyone!(args, "--veryverbose", "-vv")
-    therecanbeonlyone!(args, "--verbose"    , "-v" )
-    therecanbeonlyone!(args, "--quiet"      , "-q" )
-    therecanbeonlyone!(args, "--dry-run"    , "-n" )
+    therecanbeonlyone!(opts, "--veryverbose", "-vv")
+    therecanbeonlyone!(opts, "--verbose"    , "-v" )
+    therecanbeonlyone!(opts, "--quiet"      , "-q" )
+    therecanbeonlyone!(opts, "--dry-run"    , "-n" )
 
-    if args["--veryverbose"]
-        for (key,val) in args @printf("  %-13s  =>  %-5s\n", key, repr(val)); end
+    if opts["--veryverbose"]
+        for (key,val) in opts @printf("  %-13s  =>  %-5s\n", key, repr(val)); end
         println("  fnames: $flist")
     end
 
-    return args, flist
+    return opts, flist
 end
 
 # Auxiliary utility for testing purpose only.
@@ -211,9 +219,10 @@ end
 end # of module CLI
 
 function convertfromfortran(code; casetransform=identity, quiet=true,
-                            verbose=false, veryverbose=false)
+                            verbose=false, veryverbose=false, greeks=false, subscripts=0,
+                            greeksubscripts=false)
 
-    # ORDER OF PROCESSING IS MATTER
+    # ORDER OF PROCESSING IS FRAGILE
 
     # should be '\n' newlines only
     for rx in (r"\r\n" => @s_str("\n"), r"\r" => @s_str("\n"))
@@ -259,7 +268,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     subnames[1] == "" && (subs[2] += 1; prepend!(alllines, ("      PROGRAM",)))
 
     # converted code will be stored in string `result`
-    result = "using FortranFiles\nusing OffsetArrays\nusing Parameters\nusing Printf\n"
+    result = "using FortranFiles\nusing FortranStrings\nusing OffsetArrays\nusing Parameters\nusing Printf\n"
 
     for i = 1:length(subs)-1
 
@@ -291,7 +300,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = processiostatements(code, formatstrings)
         code = foldl(replace, reverse(collect(formatstrings)), init=code)
 
-        code, strings = savestrings(code)
+        code, strings = savestrings(code, stringtype = "F8")
 
         #write("test1.jl", code)
         code = insertabsentreturn(code)
@@ -386,28 +395,30 @@ end
 const SS = SubstitutionString
 
 function mask(smbl)
+    suffix = "iZjAcpPokM"
     if smbl == '@' || smbl == "@"
-        return "at_iZjAcpPokM"
+        return "at_$suffix"
     elseif smbl == '!' || smbl == "!"
-        return "bang_iZjAcpPokM"
+        return "bang_$suffix"
     elseif smbl == '$' || smbl == "\$"
-        return "dollar_iZjAcpPokM"
+        return "dollar_$suffix"
     elseif smbl == '"' || smbl == "\""
-        return "quote_iZjAcpPokM"
+        return "quote_$suffix"
     elseif smbl == '#' || smbl == "#"
-        return "sha_iZjAcpPokM"
+        return "sha_$suffix"
     elseif smbl == '\\' || smbl == "\\"
-        return "slashsymbol_iZjAcpPokM"
+        return "slashsymbol_$suffix"
     elseif smbl == "''"
-        return "GhUtwoap_iZjAcpPokM"
+        return "GhUtwoap_$suffix"
     elseif smbl == "end"
-        return "lastpos_iZjAcpPokM"
+        return "lastpos_$suffix"
     elseif smbl == "return"
-        return "ret_iZjAcpPokM"
+        return "ret_$suffix"
     else
-        return smbl * "_iZjAcpPokM"
+        return smbl * "$suffix"
     end
 end
+mask() = mask("")
 
 function savespecialsymbols(code::AbstractString)
     # save '#', '@', '!', "''"
@@ -505,7 +516,6 @@ function replacecontinuationmarks(code::AbstractString, fortranfixedform)
 end
 
 function collectformatstrings(code::AbstractString)
-    #formatstrings = Dict{String,String}()
     formatstrings = OrderedDict{String,String}()
 
     # collect FORMAT(some,format,args)
@@ -549,6 +559,7 @@ function collectformats(lines::AbstractVector)
 end
 
 function markbysubroutine(code)
+
     lines = splitonlines(code)
     lines .= stripcomments.(lines)
 
@@ -782,6 +793,7 @@ function parsevardecl90statement(line, vars)
             varname, pstn = taketoken(line, pstn)
             t = picktoken(line, pstn)
             if t == '(' # arrays
+                # TODO?: catch character(len=10)
                 pstn, pstn0 = skipbraces(line, pstn), pstn
                 dim = line[nextind(line,pstn0):prevind(line,prevind(line,pstn))]
                 t = picktoken(line, pstn)
@@ -914,7 +926,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
     rx = r"(\[((?>[^\[\]]++|(?1))*)\])\h*(\(((?>[^\(\)]++|(?1))*)\))"
     code = replace(code, rx => s"\1[\4]")
 
-    # fix uncompleted ranges in square braces like [1:] and [:1]
+    # fix uncompleted ranges in square braces like [1:] and [:1] and so on
     brackets = r"\[((?>[^\[\]]++|(?0))*)\]" # complementary brackets
 
     # trim line breaks after ':'
@@ -935,7 +947,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
         end
     end
 
-    # uppend with "end"
+    # uppend with "end": `A[2:]` => `A[2:end]`
     rx = r"\[(.*[^,]):(,.*|)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
@@ -945,7 +957,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
         end
     end
 
-    # prepend with '1'
+    # prepend with '1': `A[:2]` => `A[1:2]`
     rx = r"\[:([^,].*)\]"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
@@ -1006,30 +1018,32 @@ end
 """
 save and replace all strings with its hash
 """
-function savestrings(code::AbstractString, strings = OrderedDict{String, String}())
+function savestrings(code::AbstractString, strings = OrderedDict{String, String}(); stringtype = "")
 
-    # replace 'strings' with "strings" in code
+    # replace 'somestring' with STRINGTYPEPREFIX"somestring" in code
+    # https://regex101.com/r/q4fzK9/1
     rxstr = r"('((?>[^'\n]*|(?1))*)')"m
     for m in reverse(collect(eachmatch(rxstr, code)))
-        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
+        key = mask(@sprintf "STR%s" mod(hash("$(m.captures[1])"), 2^20))
         if length(m.captures[1]) > 3 || length(m.captures[1]) == 2
-            strings[key] = '"' * m.captures[2] * '"'
+            strings[key] = stringtype * '"' * m.captures[2] * '"'
             code = replace(code, m.match => key)
-        else # 'X' -- some symbol
-            strings[key] = string(m.captures[1])
+        else # 'X' -- some single symbol, but in F77 it also string
+            #strings[key] = string(m.captures[1])
+            strings[key] = stringtype * '"' * m.captures[2] * '"'
             code = replace(code, m.match => key)
         end
     end
     rxstr = r"(\"((?>[^\"\n]*|(?1))*)\")"m
     for m in reverse(collect(eachmatch(rxstr, code)))
-        key = @sprintf "STR%siZjAcpPokM" mod(hash("$(m.captures[1])"), 2^20)
-        strings[key] = string(m.captures[1])
+        key = mask(@sprintf "STR%s" mod(hash("$(m.captures[1])"), 2^20))
+        strings[key] = stringtype * string(m.captures[1])
         code = replace(code, m.match => key)
     end
 
     # save empty strings ''
-    key = @sprintf "STR%siZjAcpPokM" mod(hash("\"\""), 2^20)
-    strings[key] = "\"\""
+    key = mask(@sprintf "STR%s" mod(hash("\"\""), 2^20))
+    strings[key] = stringtype * "\"\""
     code = replace(code, mask("''") => key)
 
     return code, strings
@@ -1640,7 +1654,6 @@ function processconditionalgotos(code)
         end
         ifexpr *= "\n$(head)    $(mask('@'))error(\"non-exist label " *
                   "$(var)=$(mask('"'))\$($(var))$(mask('"')) " *
-                  #"$(var)=quote_iZjAcpPokM\$($(var))quote_iZjAcpPokM " *
                   "in goto list\")\n$(head)end$(tail)\n"
         code = code[1:prevind(code,r[1])] * ifexpr * code[nextind(code,r[end]):end]
     end
@@ -2079,7 +2092,6 @@ function processlinescontinuation(code::AbstractString)
 end
 
 function concatcontinuedlines(code)
-    # may be try `args...`
     # Note: trailing comments are not allowed here
     return code isa AbstractVector ?
            map(a->replace(a, r"\t(\n|\r)\t?|\t?(\n|\r)\t"=>"\t\t"), code) :
@@ -2143,113 +2155,219 @@ const repairreplacements = OrderedDict(
     # replace 'PRINT' => 'WRITE'
     r"(PRINT)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)",
     # Goto
-    r"^(\s*)GO\s*TO\s+(\d+)"mi => s"\1goto \2",
-    r"(\h)GO\s*TO\s+(\d+)"mi => s"\1goto \2",
-    r"(\W)GO\s*TO\s+(\d+)"mi => s"\1 goto \2",
+    r"^(\s*)GO\s*TO\s+(\d+)"mi => s"\1goto \2"  ,
+    r"(\h)GO\s*TO\s+(\d+)"mi   => s"\1goto \2"  ,
+    r"(\W)GO\s*TO\s+(\d+)"mi   => s"\1 goto \2" ,
     # NOOP
-    r"^\h*CONTINUE\h*\n"mi => "",
+    r"^\h*CONTINUE\h*\n"mi     => "",
+)
+
+
+const subscriptreplacements = OrderedDict(
+    r"\b(\w+)_0([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₀\2",
+    r"\b(\w+)_1([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₁\2",
+    r"\b(\w+)_2([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₂\2",
+    r"\b(\w+)_3([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₃\2",
+    r"\b(\w+)_4([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₄\2",
+    r"\b(\w+)_5([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₅\2",
+    r"\b(\w+)_6([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₆\2",
+    r"\b(\w+)_7([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₇\2",
+    r"\b(\w+)_8([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₈\2",
+    r"\b(\w+)_9([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₉\2",
+    r"\b(\w+)_a([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₐ\2",
+    r"\b(\w+)_e([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₑ\2",
+    r"\b(\w+)_h([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₕ\2",
+    r"\b(\w+)_i([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ᵢ\2",
+    r"\b(\w+)_j([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ⱼ\2",
+    r"\b(\w+)_k([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₖ\2",
+    r"\b(\w+)_l([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₗ\2",
+    r"\b(\w+)_m([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₘ\2",
+    r"\b(\w+)_n([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₙ\2",
+    r"\b(\w+)_o([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₒ\2",
+    r"\b(\w+)_p([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₚ\2",
+    r"\b(\w+)_r([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ᵣ\2",
+    r"\b(\w+)_s([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₛ\2",
+    r"\b(\w+)_t([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₜ\2",
+    r"\b(\w+)_u([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ᵤ\2",
+    r"\b(\w+)_v([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ᵥ\2",
+    r"\b(\w+)_x([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₓ\2",
+)
+const greeksubscriptreplacements = OrderedDict(
+    r"\b(\w+)_schwa\b" => s"\1ₔ",
+    r"\b(\w+)_beta\b"  => s"\1ᵦ",
+    r"\b(\w+)_gamma\b" => s"\1ᵧ",
+    r"\b(\w+)_rho\b"   => s"\1ᵨ",
+    r"\b(\w+)_phi\b"   => s"\1ᵩ",
+    r"\b(\w+)_chi\b"   => s"\1ᵪ",
+)
+const greeksreplacements = OrderedDict(
+    # Not all greek letters are distinguished from latin letters thus skipped.
+    # Skipped letters have case insensitive lowercase counterparts.
+
+    #r"\bALPHA([_\d]*)\b"       => s"Α\1" ,
+    #r"\bBETA([_\d]*)\b"        => s"Β\1" ,
+    r"\bGAMMA([_\d]*)\b"       => s"Γ\1" ,
+    r"\bDELTA([_\d]*)\b"       => s"Δ\1" ,
+    #r"\bEPSILON([_\d]*)\b"     => s"Ε\1" ,
+    #r"\bZETA([_\d]*)\b"        => s"Ζ\1" ,
+    #r"\bETA([_\d]*)\b"         => s"Η\1" ,
+    r"\bTHETA([_\d]*)\b"       => s"Θ\1" ,
+    #r"\bIOTA([_\d]*)\b"        => s"Ι\1" ,
+   # r"\bKAPPA([_\d]*)\b"       => s"Κ\1" ,
+    r"\bLAMBDA([_\d]*)\b"      => s"Λ\1" ,
+    r"\bXI([_\d]*)\b"          => s"Ξ\1" ,
+    r"\bPI([_\d]*)\b"          => s"Π\1" ,
+    #r"\bRHO([_\d]*)\b"         => s"Ρ\1" ,
+    r"\bSIGMA([_\d]*)\b"       => s"Σ\1" ,
+    #r"\bTAU([_\d]*)\b"         => s"Τ\1" ,
+    #r"\bUPSILON([_\d]*)\b"     => s"Υ\1" ,
+    r"\bPHI([_\d]*)\b"         => s"Φ\1" ,
+    #r"\bCHI([_\d]*)\b"         => s"Χ\1" ,
+    r"\bPSI([_\d]*)\b"         => s"Ψ\1" ,
+    r"\bOMEGA([_\d]*)\b"       => s"Ω\1" ,
+    r"\balpha([_\d]*)\b"i       => s"α\1" ,
+    r"\bbeta([_\d]*)\b"i        => s"β\1" ,
+    r"\bgamma([_\d]*)\b"       => s"γ\1" ,
+    r"\bdelta([_\d]*)\b"       => s"δ\1" ,
+    r"\bzeta([_\d]*)\b"i        => s"ζ\1" ,
+    r"\beta([_\d]*)\b"i         => s"η\1" ,
+    r"\btheta([_\d]*)\b"       => s"θ\1" ,
+    r"\biota([_\d]*)\b"i        => s"ι\1" ,
+    r"\bkappa([_\d]*)\b"i       => s"κ\1" ,
+    r"\blambda([_\d]*)\b"      => s"λ\1" ,
+    r"\bmu([_\d]*)\b"          => s"μ\1" ,
+    r"\bnu([_\d]*)\b"          => s"ν\1" ,
+    r"\bxi([_\d]*)\b"          => s"ξ\1" ,
+    r"\bpi([_\d]*)\b"          => s"π\1" ,
+    r"\brho([_\d]*)\b"i         => s"ρ\1" ,
+    r"\bvarsigma([_\d]*)\b"i    => s"ς\1" ,
+    r"\bsigma([_\d]*)\b"       => s"σ\1" ,
+    r"\btau([_\d]*)\b"i         => s"τ\1" ,
+    r"\bupsilon([_\d]*)\b"i     => s"υ\1" ,
+    r"\bvarphi([_\d]*)\b"i      => s"φ\1" ,
+    r"\bchi([_\d]*)\b"i         => s"χ\1" ,
+    r"\bpsi([_\d]*)\b"         => s"ψ\1" ,
+    r"\bomega([_\d]*)\b"       => s"ω\1" ,
+    r"\bvartheta([_\d]*)\b"    => s"ϑ\1" ,
+    r"\bphi([_\d]*)\b"         => s"ϕ\1" ,
+    r"\bvarpi([_\d]*)\b"i       => s"ϖ\1" ,
+    r"\bStigma([_\d]*)\b"i     => s"Ϛ\1" ,
+    r"\bDigamma([_\d]*)\b"i    => s"Ϝ\1" ,
+    r"\bKoppa([_\d]*)\b"       => s"Ϟ\1" ,
+    #r"\bSampi([_\d]*)\b"i      => s"Ϡ\1" ,
+    r"\bvarkappa([_\d]*)\b"i    => s"ϰ\1" ,
+    r"\bvarrho([_\d]*)\b"i      => s"ϱ\1" ,
+    r"\bVARTHETA([_\d]*)\b"    => s"ϴ\1" ,
+    r"\bepsilon([_\d]*)\b"i     => s"ϵ\1" ,
+    r"\bbackepsilon([_\d]*)\b"i => s"϶\1" ,
+
+    #r"\bforall([_\d]*)\b"i     => s"∀\1" ,
+    r"\bpartial([_\d]*)\b"i    => s"∂\1" ,
+    r"\bexists([_\d]*)\b"i     => s"∃\1" ,
+    r"\bnexists([_\d]*)\b"i    => s"∄\1" ,
+    r"\bnabla([_\d]*)\b"i      => s"∇\1" ,
 )
 
 const trivialreplacements = OrderedDict(
     #r"(\bif\b|\belseif\b|\bend\b|\bdo\b|\bwhile\b)"i => s"\L\1",
-    r"(\bif\b)"i     => s"if",
-    r"(\belseif\b)"i => s"elseif",
-    r"(\bend\b)"i    => s"end",
-    r"(\bdo\b)"i     => s"do",
-    r"(\bwhile\b)"i  => s"while",
-    # Use greek symbols, is it need?
-    r"\balpha([_\d]*)\b"i   => s"α\1",
-    r"\bbeta([_\d]*)\b"i    => s"β\1",
-    r"\bgamma([_\d]*)\b"i   => s"γ\1",
-    r"\bdelta([_\d]*)\b"i   => s"δ\1",
-    r"\bepsilon([_\d]*)\b"i => s"ϵ\1",
-    r"\blambda([_\d]*)\b"i  => s"λ\1",
-    r"\btheta([_\d]*)\b"i   => s"θ\1",
+    r"(\bif\b)"i     => s"if"     ,
+    r"(\belseif\b)"i => s"elseif" ,
+    r"(\bend\b)"i    => s"end"    ,
+    r"(\bdo\b)"i     => s"do"     ,
+    r"(\bwhile\b)"i  => s"while"  ,
     # Swap logical symbols
-    r"\.true\."i => "true",
-    r"\.false\."i => "false",
-    r"(\h+)\.or\.(\h+)"i => s"\1||\2",
-    r"(\h+)\.and\.(\h+)"i => s"\1&&\2",
-    r"(\h+)\.not\.(\h+)"i => s"\1!",
-    r"(\h+)\.eq\.(\h+)"i => s"\1==\2",
-    r"(\h+)\.ne\.(\h+)"i => s"\1!=\2",
-    r"(\h+)\/=(\h+)"i    => s"\1!=\2",
-    r"(\h+)\.le\.(\h+)"i => s"\1<=\2",
-    r"(\h+)\.ge\.(\h+)"i => s"\1>=\2",
-    r"(\h+)\.gt\.(\h+)"i => s"\1>\2",
-    r"(\h+)\.lt\.(\h+)"i => s"\1<\2",
-    r"(\h+)\.or\.\h*"i => s"\1|| ",
-    r"(\h+)\.and\.\h*"i => s"\1&& ",
-    r"(\h+)\.not\.\h*"i => s"\1!",
-    r"(\h+)\.eq\.\h*"i => s"\1== ",
-    r"(\h+)\.ne\.\h*"i => s"\1!= ",
-    r"(\h+)\/=\h*"i    => s"\1!= ",
-    r"(\h+)\.le\.\h*"i => s"\1<= ",
-    r"(\h+)\.ge\.\h*"i => s"\1>= ",
-    r"(\h+)\.gt\.\h*"i => s"\1> ",
-    r"(\h+)\.lt\.\h*"i => s"\1< ",
-    r"\h*\.or\.\h*"i => s" || ",
-    r"\h*\.and\.\h*"i => s" && ",
-    r"\h*\.not\.\h*"i => s" !",
-    r"\h*\.eq\.\h*"i => s" == ",
-    r"\h*\.ne\.\h*"i => s" != ",
-    r"\h*\/=\h*"i    => s" != ",
-    r"\h*\.le\.\h*"i => s" <= ",
-    r"\h*\.ge\.\h*"i => s" >= ",
-    r"\h*\.gt\.\h*"i => s" > ",
-    r"\h*\.lt\.\h*"i => s" < ",
+    r"\.true\."i           => "true"    ,
+    r"\.false\."i          => "false"   ,
+    r"(\h+)\.or\.(\h+)"i   => s"\1||\2" ,
+    r"(\h+)\.and\.(\h+)"i  => s"\1&&\2" ,
+    r"(\h+)\.not\.(\h+)"i  => s"\1!"    ,
+    r"(\h+)\.eq\.(\h+)"i   => s"\1==\2" ,
+    r"(\h+)\.ne\.(\h+)"i   => s"\1!=\2" ,
+    r"(\h+)\/=(\h+)"i      => s"\1!=\2" ,
+    r"(\h+)\.le\.(\h+)"i   => s"\1<=\2" ,
+    r"(\h+)\.ge\.(\h+)"i   => s"\1>=\2" ,
+    r"(\h+)\.gt\.(\h+)"i   => s"\1>\2"  ,
+    r"(\h+)\.lt\.(\h+)"i   => s"\1<\2"  ,
+    r"(\h+)\.or\.\h*"i     => s"\1|| "  ,
+    r"(\h+)\.and\.\h*"i    => s"\1&& "  ,
+    r"(\h+)\.not\.\h*"i    => s"\1!"    ,
+    r"(\h+)\.eq\.\h*"i     => s"\1== "  ,
+    r"(\h+)\.ne\.\h*"i     => s"\1!= "  ,
+    r"(\h+)\/=\h*"i        => s"\1!= "  ,
+    r"(\h+)\.le\.\h*"i     => s"\1<= "  ,
+    r"(\h+)\.ge\.\h*"i     => s"\1>= "  ,
+    r"(\h+)\.gt\.\h*"i     => s"\1> "   ,
+    r"(\h+)\.lt\.\h*"i     => s"\1< "   ,
+    r"\h*\.or\.\h*"i       => s" || "   ,
+    r"\h*\.and\.\h*"i      => s" && "   ,
+    r"\h*\.not\.\h*"i      => s" !"     ,
+    r"\h*\.eq\.\h*"i       => s" == "   ,
+    r"\h*\.ne\.\h*"i       => s" != "   ,
+    r"\h*\/=\h*"i          => s" != "   ,
+    r"\h*\.le\.\h*"i       => s" <= "   ,
+    r"\h*\.ge\.\h*"i       => s" >= "   ,
+    r"\h*\.gt\.\h*"i       => s" > "    ,
+    r"\h*\.lt\.\h*"i       => s" < "    ,
     # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
     r"(\b(?!elseif|if|while|data|parameter)[\w_]+\b)[\h]+\("i => s"\1(",
     # Some specific functions
     # https://gcc.gnu.org/onlinedocs/gcc-9.2.0/gfortran/Intrinsic-Procedures.html
     # https://docs.oracle.com/cd/E19957-01/805-4939/6j4m0vnc8/index.html
-    r"\bmod\b\h*\("i => s"mod(",
-    r"\bd?sqrt\b\h*\("i => s"sqrt(",
-    r"\bd?exp\b\h*\("i => s"exp(",
-    r"\bd?log\b\h*\("i => s"log(",
-    r"\bd?log10\b\h*\("i => s"log10(",
-    r"\bd?conjg\b\h*\("i => s"conj(",
-    r"\b[da]?imag\b\h*\("i => s"imag(",
-    r"\bd?sign\b\("i => "copysign(",
-    r"\bd?max1?\b\h*\("i => "max(",
-    r"\bd?min1?\b\h*\("i => "min(",
-    r"\bd?abs\b\h*\("i => "abs(",
-    r"\bd?sin\b\h*\("i => "sin(",
-    r"\bd?asin\b\h*\("i => "asin(",
-    r"\bd?cos\b\h*\("i => "cos(",
-    r"\bd?acos\b\h*\("i => "acos(",
-    r"\bd?tan\b\h*\("i => "tan(",
-    r"\bd?atan2?\b\h*\("i => "atan(",
-    r"\b(i[dq])?nint\b\h*\("i => "round(Int,",
-    r"\bint\b\h*\("i => "trunc(Int,",
-    r"\breal\b\h*\("i => "Float32(", # ?
-    r"\bfloat\b\h*\("i => "Float32(", # ?
-    r"\bsngl\b\h*\("i => "Float32(", # ?
-    r"\bdble\b\h*\("i => "float(",
-    r"\bdfloat\b\h*\("i => "float(",
-    r"\bcmplx\b\h*\("i => "ComplexF32(", # ?
-    r"\bdcmplx\b\h*\("i => "complex(",
-    r"\bceiling\b\h*\("i => "ceil(Int,",
-    r"\bkind\b\h*\("i => "sizeof(",
-    r"\brand\b\h*\(\)"i => "rand()",
+    r"\bmod\b\h*\("i       => s"mod("       ,
+    r"\bd?sqrt\b\h*\("i    => s"sqrt("      ,
+    r"\bd?exp\b\h*\("i     => s"exp("       ,
+    r"\bd?log\b\h*\("i     => s"log("       ,
+    r"\bd?log10\b\h*\("i   => s"log10("     ,
+    r"\bd?conjg\b\h*\("i   => s"conj("      ,
+    r"\b[da]?imag\b\h*\("i => s"imag("      ,
+    r"\bd?sign\b\("i       => "copysign("   ,
+    r"\bd?max1?\b\h*\("i   => "max("        ,
+    r"\bd?min1?\b\h*\("i   => "min("        ,
+    r"\bd?abs\b\h*\("i     => "abs("        ,
+    r"\bd?sin\b\h*\("i     => "sin("        ,
+    r"\bd?asin\b\h*\("i    => "asin("       ,
+    r"\bd?cos\b\h*\("i     => "cos("        ,
+    r"\bd?acos\b\h*\("i    => "acos("       ,
+    r"\bd?tan\b\h*\("i     => "tan("        ,
+    r"\bd?atan2?\b\h*\("i  => "atan("       ,
+    r"\b(i[dq])?nint\b\h*\("i => "round(Int, ",
+    r"\bint\b\h*\("i       => "trunc(Int, " ,
+    r"\breal\b\h*\("i      => "Float32("    , # ?
+    r"\bfloat\b\h*\("i     => "Float32("    , # ?
+    r"\bsngl\b\h*\("i      => "Float32("    , # ?
+    r"\bdble\b\h*\("i      => "float("      ,
+    r"\bdfloat\b\h*\("i    => "float("      ,
+    r"\bcmplx\b\h*\("i     => "ComplexF32(" , # ?
+    r"\bdcmplx\b\h*\("i    => "complex("    ,
+    r"\bceiling\b\h*\("i   => "ceil(Int, "  ,
+    r"\bkind\b\h*\("i      => "sizeof("     ,
+    r"\brand\b\h*\(\)"i    => "rand()"      ,
     # https://regex101.com/r/whrGry/2
     #r"(?:\brand\b\h*)(\(((?>[^()\n]+|(?1))+)\))"i => s"rand(MersenneTwister(round(Int,\2)))",
-    r"\blen\b\h*\("i => "length(",
+    r"\blen\b\h*\("i       => "length(",
     # https://regex101.com/r/whrGry/1
     r"(?:\blen_trim\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
-    r"\bbackspace\b\h+(\w+)"i => s"seek(\1, position(\1)-1) # BACKSPACE \1",
-    r"\brewind\b\h+(\w+)"i => s"seek(\1, 0) # REWIND \1",
+    r"(?:\blnblnk\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
+    # TODO: index, scan, verify, fdate, ctime
+    r"\bi?char\b\h*\("i  => "Char("    ,
+    r"\brepeat\b\h*\("i  => "repeat("  ,
+    r"\badjustr\b\h*\("i => "ADJUSTR(" ,
+    r"\badjustl\b\h*\("i => "ADJUSTL(" ,
+    # TODO: reshape, shape, lbound, ubound
+    r"\bbackspace\b\h+(\w+)"i  => s"seek(\1, position(\1)-1) # BACKSPACE \1",
+    r"\brewind\b\h+(\w+)"i     => s"seek(\1, 0) # REWIND \1",
     r"\bend\h*file\b\h+(\w+)"i => s"seekend(\1) # ENDFILE \1",
 
-    r"\bMPI_SEND\b\h*\("i  => "MPI.Send(",
-    r"\bMPI_ISEND\b\h*\("i => "MPI.Isend(",
-    r"\bMPI_RECV\b\h*\("i  => "MPI.Recv!(",
-    r"\bMPI_IRECV\b\h*\("i => "MPI.Irecv!(",
-    r"\bMPI_WTIME\b\h*\("i => "MPI.Wtime(",
+    # TODO: to complete
+    r"\bMPI_SEND\b\h*\("i  => "MPI.Send("   ,
+    r"\bMPI_ISEND\b\h*\("i => "MPI.Isend("  ,
+    r"\bMPI_RECV\b\h*\("i  => "MPI.Recv!("  ,
+    r"\bMPI_IRECV\b\h*\("i => "MPI.Irecv!(" ,
+    r"\bMPI_WTIME\b\h*\("i => "MPI.Wtime("  ,
 
     # LSAME
-    r"\bLSAME\b\h*\("i => "LSAME(",
-    #r"(?:\blsame\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"((a,b)->==(uppercase(first(a)),uppercase(b)))\1",
+    r"\bLSAME\b\h*\("i     => "LSAME("      ,
+    #r"(?:\blsame\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"((a,b)->==(uppercase(Char(first(a))),uppercase(Char(first(b))))\1",
 
     # Custom functions
     #r"(\b[\w_]+\b)\(1:J_LEN\(\1\)\)"i => s"rstrip(\1)",
