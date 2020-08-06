@@ -51,6 +51,8 @@ using Printf
 # module for CLI running
 module CLI
 
+Base.Experimental.@optlevel 0
+
 using ..FortranToJulia
 using Compat
 using DataStructures
@@ -59,14 +61,14 @@ using Printf
 
 const usage =
 """
-    This julia script converts the fortran77 and partly fortran90 code into julia.
+    Transpiler¹ converts the fortran77 and partly fortran90 code into julia.
     It uses both parsing and naive regex replacements to do as much as possible,
     but the output may need further refinement.
 
     Usage:
-        fortran-julia.jl -h | --help
         fortran-julia.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> ...
         fortran-julia.jl [--lowercase | --uppercase] ... [--] .
+        fortran-julia.jl -h | --help
 
     Samples:
         fortran-julia.jl .
@@ -91,11 +93,14 @@ const usage =
         --dontfixcontinue  Do not try to insert ommited CONTINUE in the ancient fortran DO LABEL loops.
         --packarrays
         --strings
+        --dropdeclarations
         --single           Evaluate 1.0E0 as Float32. Double precision in fortran is 1.0D0
         --omitimplicit     Omit implicit scalars initialization.
         -n, --dry-run      Make the processing but don't write output \".jl\" files.
 
     Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
+
+    [^1]: [Source-to-source compiler](https://en.wikipedia.org/wiki/Source-to-source_compiler).
 """
 
 function main(args = String[])
