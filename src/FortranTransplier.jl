@@ -285,36 +285,27 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
     code, strings = savestrings(code, stringtype = "F8")
 
-    ## mask F77 LABELS "1000" => "1000:"
-    ## https://regex101.com/r/FG2iyI/4
-    #isfixedformfortran && (code = replace(code, r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"m => s"\1:"))
-
-    # some fixes
+    # some simple fixes and conversions
+    isfixedformfortran && (code = masklabels(code))
     code = foldl(replace, collect(repairreplacements), init=code)
+    isfixedformfortran && (code = unmasklabels(code))
     write("test2.jl", code)
 
-    #alllines = splitonlines(code)
-    #write("test1.jl", tostring(alllines))
-
-    # mark lines of code occupied by each subroutine
+    # mark lines of code occupied by each module, subroutine and so on
     blocks = splitbyblocks(code, veryverbose)
-    #sourcetree[7][3] == 0 && (sourcetree[7][3:4] .+= 1; prepend!(alllines, ("      PROGRAM NAMELESSPROGRAM",)))
-    #@debug sourcetree
 
-    #blocks = splitbyblocks(alllines, sourcetree)
-    #@debug blocks
-
-    # converted code will be stored in string `result`
+    # transpiled code will be stored in the string `result`
     result = "using FortranFiles\nusing FortranStrings\nusing OffsetArrays\nusing Parameters\nusing Printf\n"
+    result *= tostring(blocks[1][codelines])
 
     for i = 2:length(blocks)
 
         b = blocks[i]
-        code = tostring(b[5])
+        code = tostring(b[codelines])
         #write("test0.jl", code)
 
         veryverbose && println()
-        verbose && print("[$(b[3]):$(b[4])] $(b[1]): $(b[2])\n")
+        verbose && print("[$(b[startat]):$(b[endat])] $(b[type]): $(b[name])\n")
 
         # extract necessary information
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
@@ -608,6 +599,33 @@ function collectformats(lines::AbstractVector)
     return formats
 end
 
+function masklabels(code::AbstractString)
+    # mask F77 labels: "1000" => "L1000:" to be like in fortran90
+    # https://regex101.com/r/FG2iyI/4
+    rx = r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"m
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = replace(m.match, r"(\d+)"m => s"L\1:")
+        code = replace(code, m.match => str)
+    end
+end
+
+unmasklabels(code::AbstractString) = replace(code, r"^(\h*)L(\d+):(\h+)"m => s"\1\2\3")
+
+"""
+Simple names for Blocks structure fields indices
+"""
+@enum Blocks type=1 name=2 startat=3 endat=4 codelines=5 parent=6 firstincluded=7
+Base.to_index(a::Blocks) = Int(a)
+Base.promote_rule(T::Type, ::Type{Blocks}) = T
+Base.convert(T::Type, a::Blocks) = T(Int(a))
+for op in (:*, :/, :+, :-, :(:))
+    @eval begin
+        Base.$op(a::Number, b::Blocks) = $op(promote(a, b)...)
+        Base.$op(a::Blocks, b::Number) = $op(promote(a, b)...)
+        #Base.$op(a::Blocks, b::Blocks) = Blocks($op(Int(a), Int(b)))
+    end
+end
+
 """
 Split code text into the blocks corresponding each module, subroutine and so on.
 Flatted resulted tree into list of the blocks will be sorted in the order of appearance.
@@ -615,8 +633,7 @@ Flatted resulted tree into list of the blocks will be sorted in the order of app
 function splitbyblocks(code, veryverbose=false)
 
     lines = splitonlines(code)
-    lines .= stripcomments.(lines)
-    lines .= rstrip.(lines)
+    lines .= rstrip.(stripcomments.(lines))
 
     # [blocktype, blockname, blockbegin, blockend, TEXT, parent,
     #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, [...], [...], ], [...], ]
@@ -624,21 +641,21 @@ function splitbyblocks(code, veryverbose=false)
     i = 1
     while (b = markbyblock(lines, i)) !== nothing
         push!(sourcetree, b)
-        i = sourcetree[end][4] + 1
+        i = sourcetree[end][endat] + 1
     end
 
-    if sourcetree[7][3] == 0
-        sourcetree[7][3:4] .+= 1
+    if sourcetree[firstincluded][startat] == 0
+        sourcetree[firstincluded][startat:endat] .+= 1
         prepend!(lines, ("      PROGRAM NAMELESSPROGRAM",))
     end
 
     if veryverbose
         for b in blocksflattening(sourcetree)
-            print("[$(b[3]):$(b[4])] $(b[1]): $(b[2])\n")
+            print("[$(b[startat]):$(b[endat])] $(b[type]): $(b[name])\n")
         end
     end
 
-    sourcetree[5] = splitonlines(code)
+    sourcetree[codelines] = splitonlines(code)
     blocks = splitbyblock!(sourcetree)
     flatted = blocksflattening(blocks)
 
@@ -669,7 +686,7 @@ function markbyblock(lines, blockbegin)
             else
                 nextblockbegin = min(i, lastnonempty+1)
                 push!(blocks, markbyblock(lines, nextblockbegin))
-                i = blocks[end][4]
+                i = blocks[end][endat]
             end
 
         elseif (m = match(rxend, l)) !== nothing
@@ -677,7 +694,9 @@ function markbyblock(lines, blockbegin)
                 @warn "Find only \"END\" without start of the program or subroutine"
                 append!(blocks, ["PROGRAM", "NAMELESSPROGRAM", 0, 0, String[], []])
             end
-            blocks[4] = i
+            @debug blocks, endat, i
+            blocks[endat] = i
+            @debug blocks, endat, i
             return blocks
         end
 
@@ -686,8 +705,8 @@ function markbyblock(lines, blockbegin)
     end
 
     if length(blocks) > 0
-        @warn "Can't find final \"END\" of the $(blocks[1]) $(blocks[2])"
-        blocks[4] = length(lines)
+        @warn "Can't find final \"END\" of the $(blocks[type]) $(blocks[name])"
+        blocks[endat] = length(lines)
         return blocks
     else
         return nothing
@@ -696,14 +715,12 @@ function markbyblock(lines, blockbegin)
 end
 
 function splitbyblock!(blocks)
-    for i in length(blocks):-1:7
+    for i in length(blocks):-1:Int(firstincluded)
         b = blocks[i]
-        ###println()
-        ###println("$(blocks[1:4]), $(axes(blocks[5]))")
-        ###println("$(b[1:4])")
-        ind = blocks[3]
-        b[5] = splice!(blocks[5], b[3]-ind+1:b[4]-ind+1, ["#=$(b[1]):$(b[2]):$(b[3]):$(b[4])=#"])
-        b[6] = Ref(blocks)
+        ind = blocks[startat]
+        b[codelines] = splice!(blocks[codelines], b[startat]-ind+1:b[endat]-ind+1,
+                       ["#=$(b[type]):$(b[name]):$(b[startat]):$(b[endat])=#"])
+        b[parent] = Ref(blocks)
         blocks[i] = splitbyblock!(blocks[i])
     end
     return blocks
@@ -711,9 +728,9 @@ end
 
 function blocksflattening(blocks)
     result = Vector{Any}()
-    push!(result, blocks[1:6])
+    push!(result, blocks[1:firstincluded-1])
     #@debug blocks[1:5]
-    for i in 7:length(blocks)
+    for i in firstincluded:length(blocks)
         append!(result, blocksflattening(blocks[i]))
     end
     return result
