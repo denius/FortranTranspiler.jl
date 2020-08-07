@@ -198,11 +198,14 @@ function parseargs(args)
 
     flist = Vector{String}()
     for fname in fnames
-        isfile(fname) && push!(flist, normpath(fname))
-        if isdir(fname)
+        if isfile(fname)
+            push!(flist, normpath(fname))
+        elseif isdir(fname)
             for (root, dirs, files) in walkdir(fname), f in files
                 any(map(r->occursin(r,f), rxfortranfiles)) && append!(flist, (joinpath(root, f),))
             end
+        else
+            @warn "No such file or directory: $(fname)"
         end
     end
     unique!(flist)
@@ -694,9 +697,7 @@ function markbyblock(lines, blockbegin)
                 @warn "Find only \"END\" without start of the program or subroutine"
                 append!(blocks, ["PROGRAM", "NAMELESSPROGRAM", 0, 0, String[], []])
             end
-            @debug blocks, endat, i
             blocks[endat] = i
-            @debug blocks, endat, i
             return blocks
         end
 
@@ -729,7 +730,6 @@ end
 function blocksflattening(blocks)
     result = Vector{Any}()
     push!(result, blocks[1:firstincluded-1])
-    #@debug blocks[1:5]
     for i in firstincluded:length(blocks)
         append!(result, blocksflattening(blocks[i]))
     end
