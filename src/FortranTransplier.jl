@@ -28,16 +28,34 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 * implied do-loops are not always caught
 
 # TODO
+    custom precision like `dzero=0.0_psb_dpk_, done=1.0_psb_dpk_` in psb_const_mod.F90
+        and `INTEGER,PARAMETER :: RP = SELECTEDREALKIND(15)`
+    1./val
+    **
+    end if
+    few PROGRAMs in one file
+    use SOMEMODULE -> use .SOMEMODULE
+    use SOMEMODULE, only: SOMEFUN -> import .SOMEMODULE: SOMEFUN
+    Token is read-only
+    SOMEFUN (PARAMS)
+    RECURSIVE
+    `FUNCTION f(x) RESULT(v)` can use as `f` as `v` as the returned value?
+    parse DO...
+    parse IF... ???
+
+
     return intent(out):
     LSAME
     XERBLA
     P_VALUE
     RWK/IWK
     M_GETMEM
+
+    see also https://www.math.fsu.edu/~dmandel/Fortran/Chap4.pdf
 =#
 
 
-module FortranToJulia
+module FortranTransplier
 
 export convertfromfortran
 
@@ -46,6 +64,7 @@ using DataStructures
 using Espresso
 using JuliaFormatter
 using Printf
+using Tokenize
 
 
 # module for CLI running
@@ -53,7 +72,7 @@ module CLI
 
 Base.Experimental.@optlevel 0
 
-using ..FortranToJulia
+using ..FortranTransplier
 using Compat
 using DataStructures
 using Glob
@@ -66,14 +85,14 @@ const usage =
     but the output may need further refinement.
 
     Usage:
-        fortran-julia.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> ...
-        fortran-julia.jl [--lowercase | --uppercase] ... [--] .
-        fortran-julia.jl -h | --help
+        FortranTransplier.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> ...
+        FortranTransplier.jl [--lowercase | --uppercase] ... [--] .
+        FortranTransplier.jl -h | --help
 
     Samples:
-        fortran-julia.jl .
-        fortran-julia.jl somefile.f somedir
-        fortran-julia.jl *.f* *.F*
+        FortranTransplier.jl .
+        FortranTransplier.jl somefile.f somedir
+        FortranTransplier.jl *.f* *.F*
 
     Options:
         -h, --help         Show this screen.
@@ -154,7 +173,7 @@ function parseargs(args)
 
     while length(args) > 0
         if first(args) == "--help" || first(args) == "-h"
-            println("fortran-julia.jl:\n$usage\n")
+            println("FortranTransplier.jl:\n$usage\n")
             exit(0)
         elseif haskey(opts, first(args))
             opts[first(args)] += 1
@@ -229,6 +248,8 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
 
     # ORDER OF PROCESSING IS FRAGILE
 
+    # Preprocess and cleanup fortran source
+
     # should be '\n' newlines only
     for rx in (r"\r\n" => @s_str("\n"), r"\r" => @s_str("\n"))
         code = replace(code, rx)
@@ -245,7 +266,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     code = savespecialsymbols(code)
 
     # convert fortran comments to #
-    isfixedformfortran && (code = replace(code, r"(\n[ ]{5})!"m => s"\1&")) # '!' => '&'
+    isfixedformfortran && (code = replace(code, r"(\n[ ]{5})!"m => s"\1&")) # '!' => '&' in 6-th col.
     code = convertfortrancomments(code)
 
     commentstrings = OrderedDict{String,String}()
@@ -255,33 +276,46 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     code = replacecontinuationmarks(code, isfixedformfortran)
     #write("test1.jl", code)
 
-    # some fixes
-    code = foldl(replace, collect(repairreplacements), init=code)
-
     code, formatstrings = collectformatstrings(code)
     if veryverbose && length(formatstrings) > 0
         println("IO FORMAT strings:")
         foreach(v -> println(replace(replace(v, mask("''")=>"''"), r"\t\r?\t"=>"\n")),
                 reverse(collect(values(formatstrings))))
     end
-    #write("test2.jl", code)
+
+    code, strings = savestrings(code, stringtype = "F8")
+
+    ## mask F77 LABELS "1000" => "1000:"
+    ## https://regex101.com/r/FG2iyI/4
+    #isfixedformfortran && (code = replace(code, r"^(?=[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"m => s"\1:"))
+
+    # some fixes
+    code = foldl(replace, collect(repairreplacements), init=code)
+    write("test2.jl", code)
 
     alllines = splitonlines(code)
+    write("test1.jl", tostring(alllines))
 
     # mark lines of code occupied by each subroutine
-    subs, subnames = markbysubroutine(alllines)
-    subnames[1] == "" && (subs[2] += 1; prepend!(alllines, ("      PROGRAM",)))
+    sourcetree = markbyblocks(alllines)
+    sourcetree[7][3] == 0 && (sourcetree[7][3:4] .+= 1; prepend!(alllines, ("      PROGRAM NAMELESSPROGRAM",)))
+    @debug sourcetree
+
+    blocks = splitbyblocks(alllines, sourcetree)
+    #@debug blocks
 
     # converted code will be stored in string `result`
     result = "using FortranFiles\nusing FortranStrings\nusing OffsetArrays\nusing Parameters\nusing Printf\n"
 
-    for i = 1:length(subs)-1
+    for i = 2:length(blocks)
 
-        code = tostring(view(alllines, subs[i]:subs[i+1]-1))
+        b = blocks[i]
+        @show b[1:4]
+        code = tostring(b[5])
         #write("test0.jl", code)
 
         veryverbose && println()
-        verbose && print("[$(subs[i]):$(subs[i+1]-1)] $(strip(subnames[i]))\n")
+        verbose && print("[$(b[3]):$(b[4])] $(b[1]):$(b[2]))\n")
 
         # extract necessary information
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
@@ -305,7 +339,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         code = processiostatements(code, formatstrings)
         code = foldl(replace, reverse(collect(formatstrings)), init=code)
 
-        code, strings = savestrings(code, stringtype = "F8")
+        #already done: code, strings = savestrings(code, stringtype = "F8")
 
         #write("test1.jl", code)
         code = insertabsentreturn(code)
@@ -386,7 +420,7 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
         try
             Meta.parse(code, 1)
         catch e
-            quiet || @error("$(strip(subnames[i]))\n$e\n")
+            quiet || @error("$(b[1]) $(b[2])\n$e\n")
         end
 
         # concat all subroutines together back
@@ -427,6 +461,8 @@ mask() = mask("")
 
 function savespecialsymbols(code::AbstractString)
     # save '#', '@', '!', "''"
+
+    # save "''" inside strings 'SOME''STRING'
     # https://regex101.com/r/YrkC9C/1
     rx = r"('((?>[^']*|(?1))*)'){2,}"m
     #rx = r"('((?>[^'\n]*|(?1))*)'){2,}"m
@@ -439,15 +475,25 @@ function savespecialsymbols(code::AbstractString)
         end
         code = replace(code, m.match => str)
     end
-    # save '!', '"', '\\', '$' inside strings
-    rx = r"('((?>[^'\n]*|(?1))*)')"m
+
+    # stitch F90 "&\n  &" continued lines marks in strings
+    rx = r"('((?>[^']*|(?1))*)')"m
     for m in reverse(collect(eachmatch(rx, code)))
-        str = replace(m.match, r"!"    => mask('!'))
-        str = replace(str,     r"\""   => mask('"'))
-        str = replace(str,     r"[\\]" => mask('\\'))
-        str = replace(str,     r"\$"   => mask('$'))
+        str = replace(m.match, r"&\h*\n\h*&"m => "")
         code = replace(code, m.match => str)
     end
+
+    # save '!', '"', '\\', '$' inside strings 'SOME!"\\$STRING'
+    rx = r"('((?>[^'\n]*|(?1))*)')"m
+    for m in reverse(collect(eachmatch(rx, code)))
+        str = replace(m.match, r"!"    => mask('!')  )
+        str = replace(str,     r"\""   => mask('"')  )
+        str = replace(str,     r"[\\]" => mask('\\') )
+        str = replace(str,     r"\$"   => mask('$')  )
+        code = replace(code, m.match => str)
+    end
+
+    # replace '@' and '#' everywhere
     code  = replace(code, r"#" => mask('#'))
     code  = replace(code, r"@" => mask('@'))
     return code
@@ -467,7 +513,7 @@ end
 
 function savecomments(code, commentstrings, casetransform=identity)
 
-    rx = r"[ ]*#(?!CMMNT\d{10}).*(?:\t|)$" # spaces go to comments
+    rx = r"[ ]*#(?!CMMNT\d{10}).*(?:\t|)$" # spaces goes to comments
     lines = splitonlines(code)
 
     for i in axes(lines,1)
@@ -500,7 +546,7 @@ function replacecontinuationmarks(code::AbstractString, fortranfixedform)
     code = replace(code, r"(?:\t\r\t|\n)([ ]*)&"m => SS("\t\r\t\\1 "))
     fortranfixedform && (code = replace(code, r"[\n\r][ ]{5}\S"m => SS("\t\r\t      ")))
 
-    # also include empty and commented lines inside the block of continued lines
+    # also include empty and commented lines inside the block of continued lines in:
     # free-form
     rx = r"\t\r\t[ ]*(#?CMMNT\d{10}|)(\n[ ]*(#?CMMNT\d{10}|))*\n[ ]*(#?CMMNT\d{10}|)\t\r\t"m
     for m in reverse(collect(eachmatch(rx, code)))
@@ -563,43 +609,103 @@ function collectformats(lines::AbstractVector)
     return formats
 end
 
-function markbysubroutine(code)
-
-    lines = splitonlines(code)
-    lines .= stripcomments.(lines)
-
-    # is there should be \s?
-    rx = r"^(\h*)((?:[\w*\h]+\h+)(?!\bend\b\h+)function|(?:recursive\h+|)subroutine|program|block\h*data|module(?!\h*procedure))\h*.*$"mi
-    #rx = r"^(\h*)((?:[\w*\h]+\h+)function|(?:recursive\h+|)subroutine|program|block\h*data|module(?!\h*procedure))\h*.*$"mi
-    marked = Vector{Int}(undef, 0)
-    names  = Vector{String}(undef, 0)
-    for i in axes(lines,1)
-        if (m = match(rx, lines[i])) !== nothing
-            push!(marked, i)
-            push!(names, strip(m.match))
-        end
+function markbyblocks(alllines)
+    lines = stripcomments.(alllines)
+    lines .= rstrip.(lines)
+    # [blocktype, blockname, blockbegin, blockend, TEXT, parent,
+    #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, [...], [...], ], [...], ]
+    blocks = ["FILE", "", 1, length(lines), String[], nothing]
+    i = 1
+    while (b = markbyblock(lines, i)) !== nothing
+        push!(blocks, b)
+        i = blocks[end][4] + 1
     end
+    return blocks
+end
 
-    # file without any program or subroutine keyword
-    if length(marked) == 0
-        push!(marked, 1)
-        push!(names, "")
-    end
+function markbyblock(lines, blockbegin)
+    # split on: module | program | subroutine | function | blockdata
 
-    rx = r"^\h*(end\h*(?!do|if)|\bcontains\b)"i
-    marked = sort(collect(marked))
-    for i = length(marked):-1:2
-        for j = marked[i]:-1:marked[i-1]
-            if occursin(rx, lines[j])
-                marked[i] = j+1
-                break
+    # https://regex101.com/r/aWXhP4/5
+    rxbegin = r"^(?:\h*|)((?:(?:\w+(?:\*\w+|)\h+|)(?:recursive\h+|)(?!\bend)function|(?:recursive\h+|)(?!\bend)subroutine|program|block\h*data|module(?!\h*procedure))\b)(?:\h+(\w+\b|)).*$"mi
+    rxend = r"^(?:\h*|)(\bend(?:|function|subroutine|program|module)\b)(\h+\w+\b|).*$"mi
+
+    # [blocktype, blockname, blockbegin, blockend, TEXT, [...], ]
+    blocks = Vector{Any}()
+    headercatched = false
+    lastnonempty = 1
+    i = blockbegin
+    while i <= length(lines)
+        l, n = concatcontinuedlines(lines, i)
+        i += n - 1 # skip multi-line
+        if (m = match(rxbegin, l)) !== nothing
+            if !headercatched
+                blocktype = uppercase(replace(m.captures[1], r"^.*(\b\w+)$"=>s"\1"))
+                blockname = uppercase(m.captures[2])
+                append!(blocks, [blocktype, blockname, blockbegin, 0, String[], []])
+                headercatched = true
+            else
+                nextblockbegin = min(i, lastnonempty+1)
+                push!(blocks, markbyblock(lines, nextblockbegin))
+                i = blocks[end][4]
             end
-        end
-    end
-    marked[1] = 1
-    push!(marked, length(lines)+1)
 
-    return marked, names
+        elseif (m = match(rxend, l)) !== nothing
+            if length(blocks) == 0
+                @warn "Find only \"END\" without start of the program or subroutine"
+                append!(blocks, ["PROGRAM", "NAMELESSPROGRAM", 0, 0, String[], []])
+            end
+            blocks[4] = i
+            return blocks
+        end
+
+        isempty(lines[i]) || (lastnonempty = i)
+        i += 1
+    end
+
+    if length(blocks) > 0
+        # absent "END"
+        blocks[4] = length(lines)
+        return blocks
+    else
+        return nothing
+    end
+
+end
+
+"""
+Split code text into the blocks corresponding each module, subroutine and so on.
+Flatting resulted tree into list of the blocks will be sorted in the order of appearance.
+"""
+function splitbyblocks(lines, sourcetree)
+    sourcetree[5] = lines
+    blocks = splitbyblock!(sourcetree)
+    flatted = blocksflattening(blocks)
+    #@debug Base.summarysize(blocks)
+    #@debug Base.summarysize(flatted)
+    @show Base.summarysize(blocks)
+    @show Base.summarysize(flatted)
+    return flatted
+end
+
+function splitbyblock!(blocks)
+    for i in length(blocks):-1:7
+        b = blocks[i]
+        b[5] = splice!(blocks[5], b[3]:b[4], ["#=$(b[1]):$(b[2]):$(b[3]):$(b[4])=#"])
+        b[6] = Ref(blocks)
+        blocks[i] = splitbyblock!(blocks[i])
+    end
+    return blocks
+end
+
+function blocksflattening(blocks)
+    result = Vector{Any}()
+    push!(result, blocks[1:6])
+    @debug blocks[1:5]
+    for i in 7:length(blocks)
+        append!(result, blocksflattening(blocks[i]))
+    end
+    return result
 end
 
 function convertfortrancomments(code)
@@ -2103,6 +2209,22 @@ function concatcontinuedlines(code)
            replace(code, r"\t(\n|\r)\t?|\t?(\n|\r)\t"=>"\t\t")
 end
 
+function concatcontinuedlines(lines::AbstractVector, i)
+    # Note: trailing comments are not allowed here
+    result = lines[i]; n = 1
+    k = i
+    while k > 1 && iscontinuedlines(lines[k-1], lines[k])
+        result = lines[k-1] * result
+        n += 1; k -= 1
+    end
+    k = i
+    while k < length(lines) && iscontinuedlines(lines[k], lines[k+1])
+        result *= lines[k+1]
+        n += 1; k += 1
+    end
+    return result, n
+end
+
 iscontinuedlines(line1, line2) = occursin(r"\t$", line1) || occursin(r"^\t", line2)
 function iscontinuedline(str, i)
     i = thisind(str, i)
@@ -2149,6 +2271,7 @@ tostring(code::AbstractString) = code
 
 splitonlines(code::AbstractVector) = deepcopy(code)
 splitonlines(code) = split(code, r"\n|\r")
+splitonfulllines(code) = split(code, r"\n")
 
 sameasarg(like::AbstractString, code::AbstractString)  = code
 sameasarg(like::AbstractVector, lines::AbstractVector) = lines
@@ -2157,14 +2280,74 @@ sameasarg(like::AbstractString, lines::AbstractVector) = tostring(lines)
 
 
 const repairreplacements = OrderedDict(
-    # replace 'PRINT' => 'WRITE'
-    r"(PRINT)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)",
+    #??? # replace 'PRINT' => 'WRITE'
+    #??? r"(PRINT)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)",
     # Goto
     r"^(\s*)GO\s*TO\s+(\d+)"mi => s"\1goto \2"  ,
     r"(\h)GO\s*TO\s+(\d+)"mi   => s"\1goto \2"  ,
     r"(\W)GO\s*TO\s+(\d+)"mi   => s"\1 goto \2" ,
     # NOOP
     r"^\h*CONTINUE\h*\n"mi     => "",
+    # "**" => '^'
+    r"\b\*\*\b"m               => "^",
+    # spaces in numbers into underscores "1 000 E3" => "1_000E3"
+    r"(\b\d+)[ ](\d+\b)"m                      => s"\1@\2",
+    r"(\b\d+)[ ](\d+(?:[eEdD][-+]?\d+)?\b)"m   => s"\1@\2",
+    r"(\b\d+)[ ]([eEdD][-+]?\d+\b)"m           => s"\1\2",
+    # fix floating point numbers with exponent
+    # https://regex101.com/r/RRHEyN/1
+    r"([-+]?[0-9]*\.?[0-9]+)[eE]([-+]?[0-9]+)"m => s"\1f\2",
+    r"([-+]?[0-9]*\.?[0-9]+)[d]([-+]?[0-9]+)"m  => s"\1e\2",
+    r"([-+]?[0-9]*\.?[0-9]+)[D]([-+]?[0-9]+)"m  => s"\1E\2",
+    # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
+    r"(\d)\.([/*+-])"               => s"\1.0\2",
+    # custom precision floats: "1.0e+3_MY_SUPER_FLOAT" => "MY_SUPER_FLOAT(1.0e+3)"
+    r"([-+]?[0-9]*\.?[0-9]+(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    r"(\d)@(\d)"                                           => s"\1_\2",
+    # spaces in keywords
+    r"\bDOUBLE\b\h+\bPRECISION\b"mi => "DOUBLEPRECISION",
+    r"\bELSE\b\h+\bIF\b"mi          => "ELSEIF",
+    r"\bSELECT\b\h+\bCASE\b"mi      => "SELECTCASE",
+    r"\bCASE\b\h+\bDEFAULT\b"mi     => "CASEDEFAULT",
+    r"\bBLOCK\b\h+\bDATA\b"mi       => "BLOCKDATA",
+    r"^(\h*|)(\bEND\b)\h+(\b(?:IF|DO|SELECT|FUNCTION|SUBROUTINE|PROGRAM|MODULE|INTERFACE|TYPE)\b)"mi => s"\1\2\3",
+    # modern logical symbols
+    r"\.true\."i           => "true"    ,
+    r"\.false\."i          => "false"   ,
+    r"(\h+)\.or\.(\h+)"i   => s"\1||\2" ,
+    r"(\h+)\.and\.(\h+)"i  => s"\1&&\2" ,
+    r"(\h+)\.not\.(\h+)"i  => s"\1!"    ,
+    r"(\h+)\.eq\.(\h+)"i   => s"\1==\2" ,
+    r"(\h+)\.ne\.(\h+)"i   => s"\1!=\2" ,
+    r"(\h+)\/=(\h+)"i      => s"\1!=\2" ,
+    r"(\h+)\.le\.(\h+)"i   => s"\1<=\2" ,
+    r"(\h+)\.ge\.(\h+)"i   => s"\1>=\2" ,
+    r"(\h+)\.gt\.(\h+)"i   => s"\1>\2"  ,
+    r"(\h+)\.lt\.(\h+)"i   => s"\1<\2"  ,
+    r"(\h+)\.or\.\h*"i     => s"\1|| "  ,
+    r"(\h+)\.and\.\h*"i    => s"\1&& "  ,
+    r"(\h+)\.not\.\h*"i    => s"\1!"    ,
+    r"(\h+)\.eq\.\h*"i     => s"\1== "  ,
+    r"(\h+)\.ne\.\h*"i     => s"\1!= "  ,
+    r"(\h+)\/=\h*"i        => s"\1!= "  ,
+    r"(\h+)\.le\.\h*"i     => s"\1<= "  ,
+    r"(\h+)\.ge\.\h*"i     => s"\1>= "  ,
+    r"(\h+)\.gt\.\h*"i     => s"\1> "   ,
+    r"(\h+)\.lt\.\h*"i     => s"\1< "   ,
+    r"\h*\.or\.\h*"i       => s" || "   ,
+    r"\h*\.and\.\h*"i      => s" && "   ,
+    r"\h*\.not\.\h*"i      => s" !"     ,
+    r"\h*\.eq\.\h*"i       => s" == "   ,
+    r"\h*\.ne\.\h*"i       => s" != "   ,
+    r"\h*\/=\h*"i          => s" != "   ,
+    r"\h*\.le\.\h*"i       => s" <= "   ,
+    r"\h*\.ge\.\h*"i       => s" >= "   ,
+    r"\h*\.gt\.\h*"i       => s" > "    ,
+    r"\h*\.lt\.\h*"i       => s" < "    ,
+    # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
+    r"(\b(?!elseif|if|while|data|parameter|selectcase|case)[\w_]+\b)[\h]+\("mi => s"\1(",
+    # "a%b" => "a.b"
+    r"(\b\w+)\h*%\h*(\w+\b)"m => s"\1.\2",
 )
 
 
@@ -2280,41 +2463,6 @@ const trivialreplacements = OrderedDict(
     r"(\bend\b)"i    => s"end"    ,
     r"(\bdo\b)"i     => s"do"     ,
     r"(\bwhile\b)"i  => s"while"  ,
-    # Swap logical symbols
-    r"\.true\."i           => "true"    ,
-    r"\.false\."i          => "false"   ,
-    r"(\h+)\.or\.(\h+)"i   => s"\1||\2" ,
-    r"(\h+)\.and\.(\h+)"i  => s"\1&&\2" ,
-    r"(\h+)\.not\.(\h+)"i  => s"\1!"    ,
-    r"(\h+)\.eq\.(\h+)"i   => s"\1==\2" ,
-    r"(\h+)\.ne\.(\h+)"i   => s"\1!=\2" ,
-    r"(\h+)\/=(\h+)"i      => s"\1!=\2" ,
-    r"(\h+)\.le\.(\h+)"i   => s"\1<=\2" ,
-    r"(\h+)\.ge\.(\h+)"i   => s"\1>=\2" ,
-    r"(\h+)\.gt\.(\h+)"i   => s"\1>\2"  ,
-    r"(\h+)\.lt\.(\h+)"i   => s"\1<\2"  ,
-    r"(\h+)\.or\.\h*"i     => s"\1|| "  ,
-    r"(\h+)\.and\.\h*"i    => s"\1&& "  ,
-    r"(\h+)\.not\.\h*"i    => s"\1!"    ,
-    r"(\h+)\.eq\.\h*"i     => s"\1== "  ,
-    r"(\h+)\.ne\.\h*"i     => s"\1!= "  ,
-    r"(\h+)\/=\h*"i        => s"\1!= "  ,
-    r"(\h+)\.le\.\h*"i     => s"\1<= "  ,
-    r"(\h+)\.ge\.\h*"i     => s"\1>= "  ,
-    r"(\h+)\.gt\.\h*"i     => s"\1> "   ,
-    r"(\h+)\.lt\.\h*"i     => s"\1< "   ,
-    r"\h*\.or\.\h*"i       => s" || "   ,
-    r"\h*\.and\.\h*"i      => s" && "   ,
-    r"\h*\.not\.\h*"i      => s" !"     ,
-    r"\h*\.eq\.\h*"i       => s" == "   ,
-    r"\h*\.ne\.\h*"i       => s" != "   ,
-    r"\h*\/=\h*"i          => s" != "   ,
-    r"\h*\.le\.\h*"i       => s" <= "   ,
-    r"\h*\.ge\.\h*"i       => s" >= "   ,
-    r"\h*\.gt\.\h*"i       => s" > "    ,
-    r"\h*\.lt\.\h*"i       => s" < "    ,
-    # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
-    r"(\b(?!elseif|if|while|data|parameter)[\w_]+\b)[\h]+\("i => s"\1(",
     # Some specific functions
     # https://gcc.gnu.org/onlinedocs/gcc-9.2.0/gfortran/Intrinsic-Procedures.html
     # https://docs.oracle.com/cd/E19957-01/805-4939/6j4m0vnc8/index.html
@@ -2742,6 +2890,6 @@ function printlines(lines)
 end
 
 
-end # of module FortranToJulia
+end # of module FortranTransplier
 
-isinteractive() || FortranToJulia.CLI.main(ARGS)
+isinteractive() || FortranTransplier.CLI.main(ARGS)
