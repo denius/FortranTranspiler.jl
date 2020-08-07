@@ -293,15 +293,15 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     code = foldl(replace, collect(repairreplacements), init=code)
     write("test2.jl", code)
 
-    alllines = splitonlines(code)
-    write("test1.jl", tostring(alllines))
+    #alllines = splitonlines(code)
+    #write("test1.jl", tostring(alllines))
 
     # mark lines of code occupied by each subroutine
-    sourcetree = markbyblocks(alllines)
-    sourcetree[7][3] == 0 && (sourcetree[7][3:4] .+= 1; prepend!(alllines, ("      PROGRAM NAMELESSPROGRAM",)))
-    @debug sourcetree
+    blocks = splitbyblocks(code, veryverbose)
+    #sourcetree[7][3] == 0 && (sourcetree[7][3:4] .+= 1; prepend!(alllines, ("      PROGRAM NAMELESSPROGRAM",)))
+    #@debug sourcetree
 
-    blocks = splitbyblocks(alllines, sourcetree)
+    #blocks = splitbyblocks(alllines, sourcetree)
     #@debug blocks
 
     # converted code will be stored in string `result`
@@ -310,12 +310,11 @@ function convertfromfortran(code; casetransform=identity, quiet=true,
     for i = 2:length(blocks)
 
         b = blocks[i]
-        @show b[1:4]
         code = tostring(b[5])
         #write("test0.jl", code)
 
         veryverbose && println()
-        verbose && print("[$(b[3]):$(b[4])] $(b[1]):$(b[2]))\n")
+        verbose && print("[$(b[3]):$(b[4])] $(b[1]): $(b[2])\n")
 
         # extract necessary information
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
@@ -609,18 +608,41 @@ function collectformats(lines::AbstractVector)
     return formats
 end
 
-function markbyblocks(alllines)
-    lines = stripcomments.(alllines)
+"""
+Split code text into the blocks corresponding each module, subroutine and so on.
+Flatted resulted tree into list of the blocks will be sorted in the order of appearance.
+"""
+function splitbyblocks(code, veryverbose=false)
+
+    lines = splitonlines(code)
+    lines .= stripcomments.(lines)
     lines .= rstrip.(lines)
+
     # [blocktype, blockname, blockbegin, blockend, TEXT, parent,
     #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, [...], [...], ], [...], ]
-    blocks = ["FILE", "", 1, length(lines), String[], nothing]
+    sourcetree = ["FILE", "", 1, length(lines), String[], nothing]
     i = 1
     while (b = markbyblock(lines, i)) !== nothing
-        push!(blocks, b)
-        i = blocks[end][4] + 1
+        push!(sourcetree, b)
+        i = sourcetree[end][4] + 1
     end
-    return blocks
+
+    if sourcetree[7][3] == 0
+        sourcetree[7][3:4] .+= 1
+        prepend!(lines, ("      PROGRAM NAMELESSPROGRAM",))
+    end
+
+    if veryverbose
+        for b in blocksflattening(sourcetree)
+            print("[$(b[3]):$(b[4])] $(b[1]): $(b[2])\n")
+        end
+    end
+
+    sourcetree[5] = splitonlines(code)
+    blocks = splitbyblock!(sourcetree)
+    flatted = blocksflattening(blocks)
+
+    return flatted
 end
 
 function markbyblock(lines, blockbegin)
@@ -664,7 +686,7 @@ function markbyblock(lines, blockbegin)
     end
 
     if length(blocks) > 0
-        # absent "END"
+        @warn "Can't find final \"END\" of the $(blocks[1]) $(blocks[2])"
         blocks[4] = length(lines)
         return blocks
     else
@@ -673,25 +695,14 @@ function markbyblock(lines, blockbegin)
 
 end
 
-"""
-Split code text into the blocks corresponding each module, subroutine and so on.
-Flatting resulted tree into list of the blocks will be sorted in the order of appearance.
-"""
-function splitbyblocks(lines, sourcetree)
-    sourcetree[5] = lines
-    blocks = splitbyblock!(sourcetree)
-    flatted = blocksflattening(blocks)
-    #@debug Base.summarysize(blocks)
-    #@debug Base.summarysize(flatted)
-    @show Base.summarysize(blocks)
-    @show Base.summarysize(flatted)
-    return flatted
-end
-
 function splitbyblock!(blocks)
     for i in length(blocks):-1:7
         b = blocks[i]
-        b[5] = splice!(blocks[5], b[3]:b[4], ["#=$(b[1]):$(b[2]):$(b[3]):$(b[4])=#"])
+        ###println()
+        ###println("$(blocks[1:4]), $(axes(blocks[5]))")
+        ###println("$(b[1:4])")
+        ind = blocks[3]
+        b[5] = splice!(blocks[5], b[3]-ind+1:b[4]-ind+1, ["#=$(b[1]):$(b[2]):$(b[3]):$(b[4])=#"])
         b[6] = Ref(blocks)
         blocks[i] = splitbyblock!(blocks[i])
     end
@@ -701,7 +712,7 @@ end
 function blocksflattening(blocks)
     result = Vector{Any}()
     push!(result, blocks[1:6])
-    @debug blocks[1:5]
+    #@debug blocks[1:5]
     for i in 7:length(blocks)
         append!(result, blocksflattening(blocks[i]))
     end
