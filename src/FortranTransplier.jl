@@ -26,6 +26,8 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 * 'FORMAT' conversion is unaccomplished
 * implied do-loops are not always caught
 * there is no OPENMP in Julia
+* OOP in Julia is not suitable for Fortran OOP, https://github.com/ipod825/OOPMacro.jl
+  is not mature.
 
 # TODO
     ~~custom precision like `dzero=0.0_psb_dpk_, done=1.0_psb_dpk_` in psb_const_mod.F90~~
@@ -38,6 +40,7 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
     parse DO...
     parse IF... ???
     insert running BLOCK DATA at startup in main()
+
 
 
     return intent(out):
@@ -97,8 +100,8 @@ const usage =
         --version          Show version.
         -q, --quiet        Suppress all console output.
         -v, --verbose      Be verbose.
-        -v, --verbose      Be more verbose.
-        -v, --verbose      Be yet more verbose.
+        -vv, --verbose     Be more verbose.
+        -vvv, --verbose    Be yet more verbose.
         --uppercase        Convert all identifiers to upper case.
         --lowercase        Convert all identifiers to lower case.
         --greeks           Replace the greek letter names thats starts the var names
@@ -109,10 +112,11 @@ const usage =
         --                 The rest of the args is only the filenames and dirs.
         --formatting       Try to format with JuliaFormatter package.
         --dontfixcontinue  Do not try to insert ommited CONTINUE in the ancient fortran DO LABEL loops.
-        --packarrays
+        --packarrays       Insert also Arrays in returned values.
         --strings
         --dropdeclarations
-        --single           Evaluate 1.0E0 as Float32. Double precision in fortran is 1.0D0
+        --indentcomments   Shift commentary strings from 1 column to more suitable place.
+        --double           Evaluate 1.0E0 as Float64, despite in fortran 1.0E0 is Float32.
         --omitimplicit     Omit implicit scalars initialization.
         -n, --dry-run      Make the processing but don't write output \".jl\" files.
 
@@ -127,14 +131,12 @@ function main(args = String[])
            opts["--lowercase"] ? lowercase : identity
 
     for fname in fnames
-        opts["--veryverbose"] && println()
-        opts["--verbose"] && println("$(fname):")
+        opts["--verbosity"] > 1 && println()
+        opts["--verbosity"] > 0 && println("$(fname):")
         code = open(fname) |> read |> String
         result = convert_fortran(code, casetransform=case, quiet=opts["--quiet"],
-                                 verbose=opts["--verbose"], veryverbose=opts["--veryverbose"],
-                                 veryveryverbose=opts["--veryveryverbose"],
-                                 greeks=opts["--greeks"], subscripts=opts["--subscripts"],
-                                 greeksubscripts=opts["--greeksubscripts"])
+                                 verbosity=opts["--verbosity"], double=opts["--double"], greeks=opts["--greeks"],
+                                 subscripts=opts["--subscripts"], greeksubscripts=opts["--greeksubscripts"])
         opts["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
         if opts["--formatting"]
             try
@@ -159,11 +161,12 @@ function parseargs(args)
     opts = OrderedDict{String, Any}()
     opts["--quiet"]           = opts["-q"]   = false
     opts["--verbose"]         = opts["-v"]   = false
-    opts["--veryverbose"]     = opts["-vv"]  = false
-    opts["--veryveryverbose"] = opts["-vvv"] = false
+                                opts["-vv"]  = false
+                                opts["-vvv"] = false
     opts["--dry-run"]         = opts["-n"]   = false
     opts["--uppercase"]       = false
     opts["--lowercase"]       = false
+    opts["--double"]          = false
     opts["--greeks"]          = false
     opts["--greeksubscripts"] = false
     opts["--subscripts"]      = 0
@@ -212,23 +215,19 @@ function parseargs(args)
     end
     unique!(flist)
 
-    if opts["--verbose"] == 2 || opts["-v"] == 2 || opts["-vv"] == 1
-        opts["--veryverbose"] = opts["--verbose"] = opts["-vv"] = opts["-v"] = true
-    elseif opts["--verbose"] == 3 || opts["-v"] == 3 || opts["-vvv"] == 1
-        opts["--veryveryverbose"] = opts["--veryverbose"] = opts["--verbose"] =
-            opts["-vvv"] = opts["-vv"] = opts["-v"] = true
-    end
+    opts["--verbosity"] = max(opts["--verbose"], opts["-v"])
+    opts["-vv"] == 1 && (opts["--verbosity"] = max(opts["--verbosity"], 2))
+    opts["-vvv"] == 1 && (opts["--verbosity"] = max(opts["--verbosity"], 3))
+    for k in ("--verbose", "-v", "-vv", "-vvv") delete!(opts, k) end
+
     for (k,v) in opts
         !isa(opts[k], Bool) && opts[k] == 1 && (opts[k] = true)
     end
 
-    therecanbeonlyone!(opts, "--veryveryverbose", "-vvv")
-    therecanbeonlyone!(opts, "--veryverbose"    , "-vv")
-    therecanbeonlyone!(opts, "--verbose"        , "-v" )
-    therecanbeonlyone!(opts, "--quiet"          , "-q" )
-    therecanbeonlyone!(opts, "--dry-run"        , "-n" )
+    therecanbeonlyone!(opts, "--quiet"  , "-q" )
+    therecanbeonlyone!(opts, "--dry-run", "-n" )
 
-    if opts["--veryveryverbose"]
+    if opts["--verbosity"] > 2
         for (key,val) in opts @printf("  %-13s  =>  %-5s\n", key, repr(val)); end
         println("  fnames: $flist")
     end
@@ -252,7 +251,7 @@ end
 end # of module CLI
 
 function convert_fortran(code; casetransform=identity, quiet=true,
-                         verbose=false, veryverbose=false, veryveryverbose=false,
+                         verbosity=0, double=false,
                          greeks=false, subscripts=0, greeksubscripts=false)
 
     # ORDER OF PROCESSING IS FRAGILE
@@ -269,13 +268,15 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     code = replace(code, r"\t"m => "  ")
 
     isfixedformfortran = !occursin(r"^[^cC*!#\n][^\n]{0,3}[^\d\h\n]"m, code)
-    @debug "isfixedformfortran = $isfixedformfortran"
+    verbosity > 1 && println("isfixedformfortran = $isfixedformfortran")
 
     # replace some symbols with the watermarks
     code = savespecialsymbols(code)
 
     # convert fortran comments to #
+    write("test1.jl", code)
     code = convertfortrancomments(code, isfixedformfortran)
+    #write("test2.jl", code)
 
     commentstrings = OrderedDict{String,String}()
     code, commentstrings = savecomments(code, commentstrings, casetransform)
@@ -285,15 +286,18 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     #write("test1.jl", code)
 
     code, formatstrings = collectformatstrings(code)
-    veryveryverbose && printformatstrings(formatstrings)
+    verbosity > 2 && printformatstrings(formatstrings)
 
-    code, strings = savestrings(code, stringtype = "F8")
+    code, strings = savestrings(code, stringtype = "")
+    #code, strings = savestrings(code, stringtype = "F8")
 
     # some simple fixes and conversions
     isfixedformfortran && (code = masklabels(code))
-    write("test1.jl", code)
+    #write("test1.jl", code)
     code = foldl(replace, collect(repairreplacements), init=code)
-    write("test2.jl", code)
+    code = double ? foldl(replace, collect(FP64replacements), init=code) :
+                    foldl(replace, collect(FPreplacements), init=code)
+    #write("test2.jl", code)
     isfixedformfortran && (code = unmasklabels(code))
 
     # tokenize test
@@ -301,27 +305,32 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     length(errs) > 0 && @show errs
 
     # mark lines of code occupied by each module, subroutine and so on
-    blocks = splitbyblocks(code, veryveryverbose)
+    blocks = splitbyblocks(code, verbosity)
 
     for i = 1:length(blocks)
 
         b = blocks[i]
-        code = tostring(b[codelines])
+        code = tostring(b[content])
+        k = b[parent]
+        p = k !== nothing ? blocks[k] : nothing
+        vars = k !== nothing ? blocks[k][localvars] : Dict{String, Var}()
 
-        veryveryverbose && println()
-        veryverbose && print("[$(b[startline]):$(b[lastline])] $(b[blocktype]): $(b[blockname])\n")
+        verbosity > 2 && println()
+        verbosity > 1 && print("[$(b[startline]):$(b[lastline])] $(b[blocktype]): $(b[blockname])\n")
+        verbosity > 2 && p !== nothing && print("parent: [$(p[startline]):$(p[lastline])] $(p[blocktype]): $(p[blockname])\n")
 
         # extract necessary information
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
-        scalars, arrays, stringvars, vars = collectvars(lines)
-        commons = collectcommon(lines)
-        dolabels, gotolabels = collectlabels(lines)
+        scalars, arrays, stringvars, commons, vars = collectvars(lines, vars, verbosity)
+        blocks[i][localvars] = copy(vars)
+        #commons = collectcommon(lines)
+        dolabels, gotolabels = collectlabels(lines, verbosity)
 
-        #veryveryverbose && length(gotolabels) > 0&& println("     labels : $gotolabels")
-        #veryveryverbose && length(dolabels) > 0&& println("   dolabels : $dolabels")
-        veryveryverbose && length(scalars) > 0 && println("    scalars : $scalars")
-        veryveryverbose && length(arrays) > 0  && println("    arrays  : $arrays")
-        veryveryverbose && length(commons) > 0 && println("    COMMONs : $commons")
+        verbosity > 2 && length(gotolabels) > 0 && println("     labels : $gotolabels")
+        verbosity > 2 && length(dolabels) > 0   && println("   dolabels : $dolabels")
+        verbosity > 2 && length(scalars) > 0    && println("    scalars : $scalars")
+        verbosity > 2 && length(arrays) > 0     && println("    arrays  : $arrays")
+        verbosity > 2 && length(commons) > 0    && println("    COMMONs : $commons")
 
         # replace array's parentheses with square brackets
         #write("test1.jl", code)
@@ -403,11 +412,12 @@ function convert_fortran(code; casetransform=identity, quiet=true,
             code = replace(code, rx)
         end
 
-        # restore saved formats, strings and symbols
+        # restore saved strings, formats, symbols and line continuations
         code = foldl(replace, reverse(collect(strings)), init=code)
         #code = foldl(replace, reverse(collect(formatstrings)), init=code)
         code = restorespecialsymbols(code)
         code = replace(code, r"\t?(\n|\r)\t|\t(\n|\r)\t?" => "\n")
+        #write("test2.jl", code)
 
         try
             Meta.parse(code, 1)
@@ -415,7 +425,7 @@ function convert_fortran(code; casetransform=identity, quiet=true,
             quiet || @error("$(b[1]) $(b[2])\n$e\n")
         end
 
-        b[codelines] = code
+        b[content] = code
 
     end # of loop over subroutines
 
@@ -423,23 +433,10 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     result = "using FortranFiles\nusing OffsetArrays\nusing Parameters\nusing Printf"
     #result = "using FortranFiles\nusing FortranStrings\nusing OffsetArrays\nusing Parameters\nusing Printf"
 
+    write("test0.jl", blocks[1][content])
     # concat blocks of code and substitute code in place pointed by references
-    i = 1
-    while i <= length(blocks)
-        b = blocks[i]
-        result *= '\n' * b[codelines]
-        for m in collect(eachmatch(r"[\n]?\h*#=(\w+):(\w+):(\d+):(\d+)=#\h*[\n]?"mi, result))
-            k = findfirst(blocks) do a
-                a[blocktype]      == m.captures[1] &&
-                a[blockname]      == m.captures[2] &&
-                "$(a[startline])" == m.captures[3] &&
-                "$(a[lastline])"  == m.captures[4]
-            end
-            result = replace(result, m.match => '\n' * blocks[k][codelines] * '\n')
-            splice!(blocks, k)
-        end
-        i += 1
-    end
+    result = mergeblocks(blocks, 1)
+    splice!(blocks, 1)
 
     return result
 end
@@ -648,7 +645,7 @@ unmasklabels(code::AbstractString) = replace(code, r"(\n\h*)L(\d+):(\h+)"m => s"
 """
 Simple names for Blocks structure fields indices
 """
-@enum Blocks blocktype=1 blockname=2 startline=3 lastline=4 codelines=5 parent=6 firstincluded=7
+@enum Blocks blocktype=1 blockname=2 startline=3 lastline=4 content=5 parent=6 localvars=7 firstincluded=8
 Base.to_index(a::Blocks) = Int(a)
 Base.promote_rule(T::Type, ::Type{Blocks}) = T
 Base.convert(T::Type, a::Blocks) = T(Int(a))
@@ -665,37 +662,46 @@ Split code text into the blocks of code corresponding each module, subroutine an
 The resulted tree is flatted into Vector of the blocks and stored in the order of appearance.
 Blocks of code: ["BlockType", "BlockName", firstline, lastline, ["Code Text"], Ref(ParentBlock)]
 """
-function splitbyblocks(code, veryveryverbose=false)
+function splitbyblocks(code, verbosity=0)
 
     lines = splitonlines(code)
     lines .= rstrip.(stripcomments.(lines))
 
     # Initial blocks tree:
     # [blocktype, blockname, blockbegin, blockend, TEXT, parent,
-    #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, [...], [...], ], [...], ]
-    sourcetree = ["FILE", "", 1, length(lines), String[], nothing]
+    #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, vars, [...], [...], ], [...], ]
+    sourcetree = ["FILE", "", 1, length(lines), String[], nothing, nothing]
     i = 1
     while (b = markbyblock(lines, i)) !== nothing
         push!(sourcetree, b)
         i = sourcetree[end][lastline] + 1
     end
 
-    if veryveryverbose
+    if verbosity > 2
         for b in blocksflattening(sourcetree)
             print("[$(b[startline]):$(b[lastline])] $(b[blocktype]): $(b[blockname])\n")
         end
     end
 
-    sourcetree[codelines] = splitonlines(code)
+    sourcetree[content] = splitonlines(code)
     blocks = splitbyblock!(sourcetree)
     flatted = blocksflattening(blocks)
 
     if (i = findfirst(a -> a[blockname]==mask("NAMELESSPROGRAM"), flatted)) !== nothing
-        #flatted[i][startline:lastline] .+= 1
-        #prepend!(flatted[i][codelines], ("      PROGRAM NAMELESSPROGRAM",))
-        #flatted[i][blockname] = "NAMELESSPROGRAM"
-        flatted[i][codelines][1] = "      PROGRAM NAMELESSPROGRAM\n" * flatted[i][codelines][1]
+        flatted[i][content][1] = "      PROGRAM NAMELESSPROGRAM\n" * flatted[i][content][1]
     end
+
+    for b in flatted
+        k = findblock(flatted, b[parent])
+        k !== nothing && (b[parent] = k)
+    end
+
+    #if verbosity > 2
+    #    for b in flatted
+    #        print("[$(b[startline]):$(b[lastline])] $(b[blocktype]): $(b[blockname])\n")
+    #        printlines(b[content])
+    #    end
+    #end
 
     return flatted
 end
@@ -703,11 +709,11 @@ end
 function markbyblock(lines, blockbegin)
     # split on: module | program | subroutine | function | blockdata
 
-    # https://regex101.com/r/aWXhP4/5
-    rxbegin = r"^(?:\h*|)((?:(?:\w+(?:\*\w+|)\h+|)(?:recursive\h+|)(?!\bend)function|(?:recursive\h+|)(?!\bend)subroutine|program|block\h*data|module(?!\h*procedure))\b)(?:\h+(\w+\b|)).*$"mi
-    rxend = r"^(?:\h*|)(\bend(?:|function|subroutine|program|module)\b)(\h+\w+\b|).*$"mi
+    # https://regex101.com/r/aWXhP4/6
+    rxbegin = r"^(?:\h*|)((?:(?:\w+(?:\*\w+|)\h+|)(?:recursive\h+|)(?!\bend)function|(?:recursive\h+|)(?!\bend)subroutine|program|block\h*data|(?!\bend)type|(?!\bend)type(?:\h*,\h*[\w\(\)]+)*|module(?!\h*procedure)))(?:(?:\h+|\h*::\h*)(\w+)).*$"mi
+    rxend = r"^(?:\h*|)(\bend(?:|function|subroutine|program|type|module)\b)(\h+\w+\b|).*$"mi
 
-    # ["BlockType", "BlockName", firstline, lastline, String[], [], [...], ]
+    # ["BlockType", "BlockName", firstline, lastline, String[], [], [], [...], ]
     blocks = Vector{Any}()
     headercatched = false
     lastnonempty = 1
@@ -717,9 +723,10 @@ function markbyblock(lines, blockbegin)
         i += n - 1 # skip multi-line
         if (m = match(rxbegin, l)) !== nothing
             if !headercatched
-                blocktype = uppercase(replace(m.captures[1], r"^.*(\b\w+)$"=>s"\1"))
+                # https://regex101.com/r/YwQVzF/2
+                blocktype = uppercase(replace(m.captures[1], r"^[^,\n]*(\b\w+|type)(?:\h*,\h*[\h\w\(\)]+)*$"i=>s"\1"))
                 blockname = uppercase(m.captures[2])
-                append!(blocks, [blocktype, blockname, blockbegin, 0, String[], []])
+                append!(blocks, [blocktype, blockname, blockbegin, 0, String[], nothing, nothing])
                 headercatched = true
             else
                 nextblockbegin = min(i, lastnonempty+1)
@@ -729,8 +736,9 @@ function markbyblock(lines, blockbegin)
 
         elseif (m = match(rxend, l)) !== nothing
             if length(blocks) == 0
+                @debug lines[blockbegin:i]
                 @warn "Find only \"END\" without start of the program or subroutine"
-                append!(blocks, ["PROGRAM", mask("NAMELESSPROGRAM"), blockbegin, 0, String[], []])
+                append!(blocks, ["PROGRAM", mask("NAMELESSPROGRAM"), blockbegin, 0, String[], nothing, nothing])
             end
             blocks[lastline] = i
             return blocks
@@ -754,7 +762,7 @@ function splitbyblock!(blocks)
     for i in length(blocks):-1:Int(firstincluded)
         b = blocks[i]
         ind = blocks[startline]
-        b[codelines] = splice!(blocks[codelines], b[startline]-ind+1:b[lastline]-ind+1,
+        b[content] = splice!(blocks[content], b[startline]-ind+1:b[lastline]-ind+1,
                        ["#=$(b[blocktype]):$(b[blockname]):$(b[startline]):$(b[lastline])=#"])
         b[parent] = Ref(blocks)
         blocks[i] = splitbyblock!(blocks[i])
@@ -771,12 +779,46 @@ function blocksflattening(blocks)
     return result
 end
 
+function findblock(blocks, type, name, i1, i2)
+    k = findfirst(blocks) do a
+        a[blocktype] == type &&
+        a[blockname] == name &&
+        a[startline] == i1 &&
+        a[lastline]  == i2
+    end
+    return k
+end
+function findblock(blocks, c::Union{Ref,Nothing})
+    if c !== nothing
+        return findblock(blocks, c[][blocktype], c[][blockname], c[][startline], c[][lastline])
+    else
+        return nothing
+    end
+end
+
+" Concatenate blocks of code and substitute code in place pointed by references comments "
+function mergeblocks(blocks, idx)
+    for m in reverse(collect(eachmatch(r"[\n]?\h*#=(\w+):(\w+):(\d+):(\d+)=#\h*[\n]?"mi, blocks[idx][content])))
+        k = findblock(blocks, m.captures[1], m.captures[2], parse(Int,m.captures[3]), parse(Int,m.captures[4]))
+        #k = findfirst(blocks) do a
+        #    a[blocktype]      == m.captures[1] &&
+        #    a[blockname]      == m.captures[2] &&
+        #    "$(a[startline])" == m.captures[3] &&
+        #    "$(a[lastline])"  == m.captures[4]
+        #end
+        blocks[idx][content] = replace(blocks[idx][content], m.match => '\n'*mergeblocks(blocks, k))
+        splice!(blocks, k)
+    end
+    return blocks[idx][content]
+end
+
 function convertfortrancomments(code, isfixedformfortran = false)
     code1 = tostring(code)
     # '!' => '&' in 6-th col.
     isfixedformfortran && (code1 = replace(code1, r"(\n[ ]{5})!"m => s"\1&"))
-    rx = r"(^[cC*]|!)([^\n]*)"m
-    code1 = replace(code1, rx => s"#\2")
+    rxfixed = r"(^[cC*]|!)([^\n]*)"m
+    rx90 = r"(!)([^\n]*)"m
+    code1 = isfixedformfortran ? replace(code1, rxfixed => s"#\2") : replace(code1, rx90 => s"#\2")
     code1 = replace(code1, r"#=" => "# ") # accident multiline comment
     return sameasarg(code, code1)
 end
@@ -795,7 +837,7 @@ function Base.show(io::IO, v::Var)
 end
 
 
-function collectvars(lines::AbstractVector)
+function collectvars(lines::AbstractVector, vars, verbosity=0)
 
     lines1 = typeof(lines)()
     savedstrings = OrderedDict{String, String}()
@@ -807,12 +849,12 @@ function collectvars(lines::AbstractVector)
     end
 
     declkeywords = ("DIMENSION", "INTEGER", "LOGICAL", "CHARACTER", "REAL", "COMPLEX",
-                    "DOUBLEPRECISION", "INTENT", "TYPE", "EXTERNAL", "PARAMETER", )
+                    "DOUBLEPRECISION", "INTENT", "TYPE", "EXTERNAL", "PARAMETER", "COMMON" )
 
     matched90 = Dict{Int,Any}()
     matched   = Dict{Int,Any}()
     for (i,l) in enumerate(lines1)
-        ts = collect(tokenize(l))
+        ts = collect(tokenize(uppercase(l)))
         ts = filter(a->a.kind!=Tokens.WHITESPACE, ts)
         if any(a->a.kind == Tokens.DECLARATION, ts)
             matched90[i] = ts
@@ -821,16 +863,14 @@ function collectvars(lines::AbstractVector)
         end
     end
 
-    vars    = Dict{String, Var}()
-    #vars    = Dict{String, NamedTuple{(:decl,:name,:dim,:val),Tuple{String,String,String,String}}}()
+    #vars    = Dict{String, Var}()
+    commons = Dict{String, String}()
     for (i,ts) in matched
-        vars = parsevardeclstatement(lines1[i], ts, vars)
+        vars, commons = parsevardeclstatement(lines1[i], ts, vars, commons, verbosity)
     end
     for (i,ts) in matched90
-        vars = parsevardecl90statement(lines1[i], ts, vars)
+        vars = parsevardecl90statement(lines1[i], ts, vars, verbosity)
     end
-    #@debug for (k,v) in vars println("$k: \"$v\"") end
-    #@debug "vars = \"$vars\""
 
     arrays = Vector{String}()
     scalars = Vector{String}()
@@ -840,30 +880,31 @@ function collectvars(lines::AbstractVector)
 
     # separate vars on types
     for (k,v) in vars
-        occursin(r"\bEXTERNAL\b", v.decl) && (pop!(vars, k); continue) # exclude EXTERNAL
+        # exclude EXTERNAL, PROCEDURE, GENERIC -- it's the functions
+        occursin(r"\bEXTERNAL\b|\bPROCEDURE\b|\bGENERIC\b"i, v.decl) && continue
         length(v.dim) == 0 ? push!(scalars, k) : push!(arrays, k)
-        occursin(r"\bCHARACTER\b", v.decl) && push!(strings, k)
+        occursin(r"\bCHARACTER\b"i, v.decl) && push!(strings, k)
         #occursin(rxch, v.decl) && push!(strings, k)
     end
     # in FORTRAN even single CHARACTER can be accessed by index:
     # `CH(:1)` or `CH(1:1)` thus any CHARACTER variable is an array
     append!(arrays, strings)
 
-    @debug "scalars = \"$scalars\""
-    @debug "arrays  = \"$arrays\""
-    @debug "strings = \"$strings\""
-    @debug "vars = \"$vars\""
+    length(scalars) > 0 && @debug "scalars = \"$scalars\""
+    length(arrays)  > 0 && @debug "arrays  = \"$arrays\""
+    length(strings) > 0 && @debug "strings = \"$strings\""
+    length(vars)    > 0 && @debug "vars = \"$vars\""
 
     # restore initial strings values
     for s in strings
         vars[s].val = restorestrings(vars[s].val, savedstrings)
     end
 
-    return scalars, arrays, strings, vars
+    return scalars, arrays, strings, commons, vars
 end
 
 
-function parsevardeclstatement(line, ts, vars)
+function parsevardeclstatement(line, ts, vars, commons, verbosity=0)
     # parse strings like this:
     # INTEGER X(10),Y(*),Z(2,*),I
     # CHARACTER*(*) S(2)
@@ -872,15 +913,33 @@ function parsevardeclstatement(line, ts, vars)
 
     startvarsind = 1
 
-    @debug "parcedline = \"$line\""
-    @debug for (i,z) in enumerate(ts) print("$i: "); show(z); println() end
+    verbosity > 2 && @debug "parcedline = \"$line\""
+    #verbosity > 2 && @debug for (i,z) in enumerate(ts) print("$i: "); show(z); println() end
 
     # split onto decl and vars
-    if ts[1].val == "PARAMETER"
+    if ts[1].val == "COMMON"
+        @assert ts[2].kind == Tokens.FWD_SLASH && ts[4].kind == Tokens.FWD_SLASH
+        common = similar(ts, 0)
+        startvarsind = i = 5
+        while i <= length(ts)
+            if ts[i].kind in (Tokens.COMMA, Tokens.IDENTIFIER, Tokens.ENDMARKER)
+                push!(common, ts[i])
+            elseif isleftbrace(ts[i])
+                i = findmatchedbrace(ts, i)
+            else
+                @error "unexpected token \"$(ts[i])\" in \"$(restore(ts))\""
+            end
+            i += 1
+        end
+        @debug common
+        commons[ts[3].val] = restore(common)
+        decltype0 = restore(ts[2:4])
+    elseif ts[1].val == "PARAMETER"
         @assert ts[2].kind == Tokens.LPAREN && ts[end-1].kind == Tokens.RPAREN
         splice!(ts, 2:2)
         splice!(ts, length(ts)-1:length(ts)-1)
         startvarsind = 2
+        decltype0 = restore(ts[1:1])
     else
         for i = 1:length(ts)-1
             if ts[i+1].kind == Tokens.IDENTIFIER &&
@@ -888,9 +947,8 @@ function parsevardeclstatement(line, ts, vars)
                 startvarsind = i + 1; break
             end
         end
+        decltype0 = restore(ts[1:startvarsind-1])
     end
-
-    decltype0 = join(untokenize.(ts[1:startvarsind-1]))
 
     i = startvarsind
     while i <= length(ts)
@@ -946,26 +1004,27 @@ function parsevardeclstatement(line, ts, vars)
                 push!(vars, k => Var(decltype,varname,dim,val))
             end
         else
-            @error "unexpected kind \"$(tt.kind)\" of token \"$tt\""
+            @error "unexpected kind \"$(tt.kind)\" of token \"$(dump(tt))\"" *
+                   " in \"$(restore(ts))\""
             exit(1)
         end
     end
 
-    return vars
+    return vars, commons
 end
 
 
-function parsevardecl90statement(line, ts, vars)
+function parsevardecl90statement(line, ts, vars, verbosity=0)
     # parse strings like this:
     # character*(*),parameter::NAME='FUNNAM'
     # Integer,Dimension(3)::K(2)=(/12,13/),I
     # Real(kind=kdp),Dimension(:),Intent(InOut)::XDONT
 
-    @debug "parcedline = \"$line\""
-    @debug for (i,z) in enumerate(ts) print("$i: "); show(z); println() end
+    verbosity > 2 && @debug "parcedline = \"$line\""
+    #verbosity > 2 && @debug for (i,z) in enumerate(ts) print("$i: "); show(z); println() end
 
     startvarsind = findfirst(t->t.kind==Tokens.DECLARATION, ts) + 1 # "::"
-    decltype = restore(@view ts[1:startvarsind-2])
+    decltype0 = restore(@view ts[1:startvarsind-2])
     i = findfirst(t->t.val=="DIMENSION", @view ts[1:startvarsind-2])
     dim0 = i!==nothing && ts[i+1].kind == LPAREN ? restore(@view ts[i+1:findmatchedbrace(ts,i)-1]) : ""
     # catch braces and its contents https://regex101.com/r/inyyeW/2
@@ -980,15 +1039,13 @@ function parsevardecl90statement(line, ts, vars)
             break
         elseif tt.kind == Tokens.COMMA || tt.kind == Tokens.WHITESPACE
             i += 1
-        elseif tt.kind == Tokens.PAIR_ARROW # "=>"
-            break
         elseif tt.kind == Tokens.IDENTIFIER #
             varname = tt.val
             t = ts[i+=1]
             if t.kind == Tokens.LPAREN #'(' # arrays
                 # TODO?: catch character(len=10)
                 i, i0 = findmatchedbrace(ts, i), i
-                dim = restore(ts[i0+1:i-1])
+                dim = restore(@view ts[i0+1:i-1])
                 t = ts[i+=1]
             elseif dim0 != ""
                 dim = dim0
@@ -999,9 +1056,23 @@ function parsevardecl90statement(line, ts, vars)
                 i += 1; i0 = i
                 # catch ',' or EOL
                 i = something(findnexttoken(Tokens.COMMA, ts, i), length(ts)+1)
-                val = restore(ts[i0:i-1])
+                val = restore(@view ts[i0:i-1])
             else
                 val = ""
+            end
+            if t.kind == Tokens.PAIR_ARROW # "=>"
+                # Type-bound procedure declaration
+                # https://stackoverflow.com/questions/31885866/what-does-equals-greater-than-mean-in-fortran
+                if occursin(r"\bGENERIC\b|\bPROCEDURE\b"i, decltype0)
+                    val = restore(@view ts[i+1:end])
+                    decltype = decltype0 * ",ASSOCIATION"
+                    i = length(ts)
+                else
+                    @error "unexpected token \"$(t.kind)\" in declaration \"$(restore(ts))\""
+                    exit(1)
+                end
+            else
+                decltype = decltype0
             end
             k = uppercase(varname)
             if haskey(vars, k)
@@ -1013,7 +1084,8 @@ function parsevardecl90statement(line, ts, vars)
                 push!(vars, k => Var(decltype,varname,dim,val))
             end
         else
-            @error "unexpected kind \"$(tt.kind)\" of token \"$tt\""
+            @error "unexpected kind \"$(tt.kind)\" of token \"$(dump(tt))\"" *
+                   " in \"$(restore(ts))\""
             exit(1)
         end
     end
@@ -1039,7 +1111,7 @@ function collectcommon(lines::AbstractVector)
     return matched
 end
 
-function collectlabels(lines::AbstractVector)
+function collectlabels(lines::AbstractVector, verbosity=0)
 
     # capture 'DO's and 'GOTO's labels
     dolabels = Accumulator{String,Int}()
@@ -1085,8 +1157,8 @@ function collectlabels(lines::AbstractVector)
         end
     end
 
-    @debug "dolabels: \"$dolabels\""
-    @debug "gotolabels: \"$gotolabels\""
+    verbosity > 1 && length(dolabels)   > 0 && @debug "dolabels: \"$dolabels\""
+    verbosity > 1 && length(gotolabels) > 0 && @debug "gotolabels: \"$gotolabels\""
     return dolabels, gotolabels
 end
 
@@ -2102,8 +2174,8 @@ function processselectcase(code)
     var = ""
     case1 = false
     for i in axes(lines,1)
-        if occursin(r"select\h+case"i, lines[i])
-            expr = replace(lines[i], r"^\h*select\h+case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
+        if occursin(r"select\h*case"i, lines[i])
+            expr = replace(lines[i], r"^\h*select\h*case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
             if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
                 var = expr
                 lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SS("\\1#\\2"))
@@ -2125,10 +2197,10 @@ function processselectcase(code)
             lines[i] = replace(lines[i], r"^(\h*)case\h*\(.*\)(\h*#.*|\h*)$"mi =>
                                          SS("\\1"*exprs*"\\2"))
             case1 = false
-        elseif !isempty(var) && occursin(r"^\h*case\h+default"mi, lines[i])
-            lines[i] = replace(lines[i], r"^(\h*)case\h+default(\h*#.*|\h*)$"mi => s"\1else\2")
+        elseif !isempty(var) && occursin(r"^\h*case\h*default"mi, lines[i])
+            lines[i] = replace(lines[i], r"^(\h*)case\h*default(\h*#.*|\h*)$"mi => s"\1else\2")
             var = ""
-        elseif !isempty(var) && occursin(r"^\h*end\h+select"mi, lines[i])
+        elseif !isempty(var) && occursin(r"^\h*end\h*select"mi, lines[i])
             var = ""
         end
     end
@@ -2371,20 +2443,6 @@ const repairreplacements = OrderedDict(
     r"^\h*CONTINUE\h*\n"mi     => "",
     # "**" => '^'
     r"(?<!\*)\*\*(?!\*)"m => s"^",
-    # spaces in numbers into underscores "1 000 E3" => "1_000E3"
-    r"(\b\d+)[ ](\d+\b)"m                      => s"\1@\2",  # '@' will be restored later
-    r"(\b\d+)[ ](\d+(?:[eEdD][-+]?\d+)?\b)"m   => s"\1@\2",
-    r"(\b\d+)[ ]([eEdD][-+]?\d+\b)"m           => s"\1\2",
-    # fix floating point numbers with exponent
-    # https://regex101.com/r/RRHEyN/1
-    r"([-+]?[0-9]*\.?[0-9]+)[eE]([-+]?[0-9]+)"m => s"\1f\2",
-    r"([-+]?[0-9]*\.?[0-9]+)[d]([-+]?[0-9]+)"m  => s"\1e\2",
-    r"([-+]?[0-9]*\.?[0-9]+)[D]([-+]?[0-9]+)"m  => s"\1E\2",
-    # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
-    r"(\d)\.([/*+-])"               => s"\1.0\2",
-    # custom precision floats: "1.0e+3_MY_SUPER_FLOAT" => "MY_SUPER_FLOAT(1.0e+3)"
-    r"([-+]?[0-9]*\.?[0-9]+(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
-    r"(\d)@(\d)"                                           => s"\1_\2",
     # spaces in keywords
     r"\bDOUBLE\b\h+\bPRECISION\b"mi => "DOUBLEPRECISION",
     r"\bDO\b\h+\bWHILE\b"mi         => "DOWHILE",
@@ -2428,6 +2486,52 @@ const repairreplacements = OrderedDict(
     r"\h*\.lt\.\h*"i       => s" < "    ,
     # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
     r"(\b(?!elseif|if|while|data|parameter|selectcase|case)[\w_]+\b)[\h]+\("mi => s"\1(",
+)
+const FPreplacements = OrderedDict(
+    # fix floating point numbers with exponent
+    # spaces in numbers into underscores "1 000 E3" => "1_000E3"
+    r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1@\2",  # '@' will be restored later
+    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][-+]?\d+)?\b)"m   => s"\1@\2",
+    r"(?<!\*)(\b\d+)[ ]+([eEdD][-+]?\d+\b)"m           => s"\1\2",
+    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([-+]?\d+))?\b)"m   => s"\1@\3f\4",
+    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([-+]?\d+))?\b)"m   => s"\1@\3e\4",
+    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([-+]?\d+))?\b)"m   => s"\1@\3E\4",
+    #r"(\b\d+)[ ]+[eEdD]([-+]?\d+\b)"m           => s"\1f\2",
+    #r"(\b\d+)[ ]+[eEdD]([-+]?\d+\b)"m           => s"\1e\2",
+    #r"(\b\d+)[ ]+[eEdD]([-+]?\d+\b)"m           => s"\1E\2",
+    # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
+    r"(\d)\.([/*+-])"               => s"\1.0\2",
+    # 1.D0 https://regex101.com/r/RRHEyN/4
+    r"([-+]?[0-9]+)\.([eEdD][-+]?[0-9]+)"      => s"\1.0\2",
+    # custom precision floats: "1.0e+3_MY_SUPER_FLOAT" => "MY_SUPER_FLOAT(1.0e+3)"
+    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    #r"([-+]?[0-9]*\.?[0-9]+(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    r"(\d)@(\d)"                                           => s"\1_\2",
+    # https://regex101.com/r/RRHEyN/2
+    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([-+]?[0-9]+))"m => s"\1f\2",
+    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([-+]?[0-9]+))"m => s"\1e\2",
+    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([-+]?[0-9]+))"m => s"\1E\2",
+    # "a%b" => "a.b"
+    r"(\b\w+)\h*%\h*(\w+\b)"m => s"\1.\2",
+)
+const FP64replacements = OrderedDict(
+    # fix floating point numbers with exponent
+    # spaces in numbers into underscores "1 000 E3" => "1_000E3"
+    r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1@\2",  # '@' will be restored later
+    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][-+]?\d+)?\b)"m   => s"\1@\2",
+    r"(?<!\*)(\b\d+)[ ]+([eEdD][-+]?\d+\b)"m           => s"\1\2",
+    # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
+    r"(\d)\.([/*+-])"               => s"\1.0\2",
+    # 1.D0 https://regex101.com/r/RRHEyN/4
+    r"([-+]?[0-9]+)\.([eEdD][-+]?[0-9]+)"      => s"\1.0\2",
+    # custom precision floats: "1.0e+3_MY_SUPER_FLOAT" => "MY_SUPER_FLOAT(1.0e+3)"
+    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    #r"([-+]?[0-9]*\.?[0-9]+(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    r"(\d)@(\d)"                                           => s"\1_\2",
+    # https://regex101.com/r/RRHEyN/2
+    #r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([-+]?[0-9]+))"m => s"\1e\2",
+    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([-+]?[0-9]+))"m => s"\1e\2",
+    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([-+]?[0-9]+))"m => s"\1E\2",
     # "a%b" => "a.b"
     r"(\b\w+)\h*%\h*(\w+\b)"m => s"\1.\2",
 )
@@ -2633,7 +2737,7 @@ const replacements = OrderedDict(
     # Replace ELSE with else
     r"^(\s*)\bELSE\b"m => s"\1else",
     # Relace END XXXX with end
-    r"^(\h*)END\h*(?:FUNCTION|(?:RECURSIVE\h+|)SUBROUTINE|PROGRAM|MODULE|BLOCK|DO|IF|SELECT)\h*\w*$"mi => s"\1end",
+    r"^(\h*)END\h*(?:FUNCTION|(?:RECURSIVE\h+|)SUBROUTINE|PROGRAM|MODULE|TYPE|BLOCK|DO|IF|SELECT)\h*\w*$"mi => s"\1end",
     r"^(\h*)END$"mi => s"\1end",
     # Don't need CALL
     r"([^ ])\bCALL\b(\h+)"i => s"\1 ",
@@ -2683,30 +2787,31 @@ const headersprocessing = OrderedDict(
     r"^(\h+)subroutine(\h+)(\w+)(\(([^)]*)\))(\h*#.*?|\h*)\n(#\h*\n)?#\h*function:\h*(.*?)#\h*\n"is =>
     SubstitutionString("\"\"\"\n    \\3(\\5)\n\n\\8\"\"\"\nfunction \\3(\\5)\n#\n"),
     # Simple subroutine
-    r"^\h*(?:recursive\h+|)subroutine\h+(\w+)\h*\("mi => s"function \1(",
-    r"^\h*(?:recursive\h+|)subroutine\h+(\w+)\h*"mi => s"function \1()",
-    #r"^\h*subroutine\h+"mi => s"function ",
-    r"^\h*program\h+(\w+)"mi => s"function \1()",
-    r"^\h*block\h*data\h+(\w+)"mi => s"function \1()",
-    r"^\h*module\h+"mi => s"module ",
-    r"^\h*real(?:\*\d{1,2})?\h*function\h+"mi => s"function ",
-    r"^\h*complex(?:\*\d{1,2})?\h*function\h+"mi => s"function ",
-    r"^\h*double\h*precision\h*function\h+"mi => s"function ",
-    r"^\h*integer(?:\*\d{1,2})?\h*function\h+"mi => s"function ",
-    r"^\h*character(?:\*\d{1,2})?\h*function\h+"mi => s"function ",
-    r"^\h*logical\h*function\h+"mi => s"function ",
-    r"^\h*function\h+"mi => s"function ",
+    r"^(\h*|)(?:recursive\h+|)subroutine\h+(\w+)\h*\("mi => s"\1function \2(",
+    r"^(\h*|)(?:recursive\h+|)subroutine\h+(\w+)\h*"mi   => s"\1function \2()",
+    r"^(\h*|)program\h+(\w+)"mi                          => s"\1function \2()",
+    r"^(\h*|)block\h*data\h+(\w+)"mi                     => s"\1function \2()",
+    r"^(\h*|)module\h+"mi                                => s"\1module ",
+    r"^(\h*|)(type\h*(?!\(\h*\w+\)\h*)[^:]*::\h*(\w+).*)$"mi                 => s"\1#\2\n\1mutable struct \3",
+    r"^(\h*|)(type\h+(\w+).*)$"mi                        => s"\1#\2\n\1mutable struct \3",
+    r"^(\h*|)real(?:\*\d{1,2})?\h*function\h+"mi         => s"\1function ",
+    r"^(\h*|)complex(?:\*\d{1,2})?\h*function\h+"mi      => s"\1function ",
+    r"^(\h*|)double\h*precision\h*function\h+"mi         => s"\1function ",
+    r"^(\h*|)integer(?:\*\d{1,2})?\h*function\h+"mi      => s"\1function ",
+    r"^(\h*|)character(?:\*\d{1,2})?\h*function\h+"mi    => s"\1function ",
+    r"^(\h*|)logical\h*function\h+"mi                    => s"\1function ",
+    r"^(\h*|)function\h+"mi                              => s"\1function ",
 )
 
 
 # Patterns to remove
 const removal = [
     # Declarations
-    r"\n\s*implicit none"i,
-    r"\n\s*real,\s*external\s.*"i,
-    r"\n\s*external\s.*"i,
-    r"\n\s*intrinsic\s.*"i,
-    r"\n\s*contains\s.*"i,
+    r"\n\s*implicit\s*none\b[^\n]*"i,
+    r"\n\s*real\s*,\s*external\b[^\n]*"i,
+    r"\n\s*external\b[^\n]*"i,
+    r"\n\s*intrinsic\b[^\n]*"i,
+    r"\n\s*contains\b[^\n]*"i,
 ]
 
 
