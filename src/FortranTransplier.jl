@@ -64,6 +64,7 @@ using DocStringExtensions
 using Espresso
 using JuliaFormatter
 using Printf
+using Setfield
 using Tokenize
 import Tokenize.Tokens.Token
 
@@ -270,16 +271,16 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     isfixedformfortran = !occursin(r"^[^cC*!#\n][^\n]{0,3}[^\d\h\n]"m, code)
     verbosity > 1 && println("isfixedformfortran = $isfixedformfortran")
 
-    # replace some symbols with the watermarks
+    # replace some symbols with the watermarks, and julia Keywords
     code = savespecialsymbols(code)
 
     # convert fortran comments to #
-    write("test1.jl", code)
+    #write("test1.jl", code)
     code = convertfortrancomments(code, isfixedformfortran)
     #write("test2.jl", code)
 
     commentstrings = OrderedDict{String,String}()
-    code, commentstrings = savecomments(code, commentstrings, casetransform)
+    code, commentstrings = savecomments(code, commentstrings)
 
     # convert lines continuations marks to "\t\r\t"
     code = replacecontinuationmarks(code, isfixedformfortran)
@@ -300,9 +301,9 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     #write("test2.jl", code)
     isfixedformfortran && (code = unmasklabels(code))
 
-    # tokenize test
-    errs = filter(x->x.token_error!=Tokens.TokenError(0), collect(tokenize(code)))
-    length(errs) > 0 && @show errs
+    # transform case and preserve keywords
+    code, identifiers = casedsavekeywords(code, casetransform)
+    verbosity > 2 && @show identifiers
 
     # mark lines of code occupied by each module, subroutine and so on
     blocks = splitbyblocks(code, verbosity)
@@ -322,7 +323,9 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         # extract necessary information
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
         scalars, arrays, stringvars, commons, vars = collectvars(lines, vars, verbosity)
-        blocks[i][localvars] = copy(vars)
+        blocks[i][localvars] = vars
+        #blocks[i][localvars] = copy(vars)
+        blocks[i][localcommons] = commons
         #commons = collectcommon(lines)
         dolabels, gotolabels = collectlabels(lines, verbosity)
 
@@ -348,6 +351,7 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         #write("test2.jl", code)
 
         code = processcommon(code, commons, arrays)
+        #write("test-$(b[1])-$(b[2])-$(b[3])-$(b[4]).jl", code)
 
         code, commentstrings = commentoutdeclarations(code, commentstrings)
 
@@ -417,7 +421,7 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         #code = foldl(replace, reverse(collect(formatstrings)), init=code)
         code = restorespecialsymbols(code)
         code = replace(code, r"\t?(\n|\r)\t|\t(\n|\r)\t?" => "\n")
-        #write("test2.jl", code)
+        #write("test-$(b[1])-$(b[2])-$(b[3])-$(b[4]).jl", code)
 
         try
             Meta.parse(code, 1)
@@ -430,12 +434,14 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     end # of loop over subroutines
 
     # transpiled code will be stored in the string `result`
-    result = "using FortranFiles\nusing OffsetArrays\nusing Parameters\nusing Printf"
+    result = "using FortranFiles\nusing OffsetArrays\nusing Parameters\nusing Printf\n"
     #result = "using FortranFiles\nusing FortranStrings\nusing OffsetArrays\nusing Parameters\nusing Printf"
 
-    write("test0.jl", blocks[1][content])
+    # insert global Parameters for COMMONs emulation
+    result *= insertcommons(blocks, identifiers)
+
     # concat blocks of code and substitute code in place pointed by references
-    result = mergeblocks(blocks, 1)
+    result *= mergeblocks(blocks, 1)
     splice!(blocks, 1)
 
     return result
@@ -469,6 +475,44 @@ function mask(smbl)
 end
 mask() = mask("")
 
+"""
+$(SIGNATURES)
+Collect all identifiers in code and count them. This allows to get most frequiently used
+variants of identifiers in case of different case of letters.
+"""
+function collectidentifiers(ts::AbstractVector{<:Token})
+    ids = Dict{String, Accumulator{String,Int}}()
+    for t in ts
+        if t.kind == Tokens.IDENTIFIER
+            K = uppercase(t.val)
+            !haskey(ids,K) && (ids[K] = Accumulator{String,Int}())
+            push!(ids[K], t.val)
+        end
+    end
+    identifiers = String[]
+    for (k,v) in ids
+        if length(v) > 1
+            c = nlargest(v, 2)
+            if c[1][2] == c[2][2]
+                # to prefer lowercase identifiers
+                s = islowercase(c[1][1][1]) ? c[1][1] :
+                    islowercase(c[2][1][1]) ? c[2][1] :
+                                              c[1][1]
+            else
+                s = c[1][1]
+            end
+        else
+            s = nlargest(v)[1][1]
+        end
+        push!(identifiers, s)
+    end
+    return sort(identifiers)
+end
+
+"""
+$(SIGNATURES)
+Save special symbols inside strings.
+"""
 function savespecialsymbols(code::AbstractString)
     # save '#', '@', '!', "''"
 
@@ -486,14 +530,14 @@ function savespecialsymbols(code::AbstractString)
         code = replace(code, m.match => str)
     end
 
-    # stitch F90 "&\n  &" continued lines marks in strings
+    # stitch Fortran90 "&\n  &" continued lines marks in strings
     rx = r"('((?>[^']*|(?1))*)')"m
     for m in reverse(collect(eachmatch(rx, code)))
         str = replace(m.match, r"&\h*\n\h*&"m => "")
         code = replace(code, m.match => str)
     end
 
-    # save '!', '"', '\\', '$' inside strings 'SOME!"\\$STRING'
+    # save '!', '"', '\\', '$' inside strings like 'SOME!"\\$STRING'
     rx = r"('((?>[^'\n]*|(?1))*)')"m
     for m in reverse(collect(eachmatch(rx, code)))
         str = replace(m.match, r"!"    => mask('!')  )
@@ -521,9 +565,214 @@ function restorespecialsymbols(code::AbstractString)
     return code
 end
 
+Base.length(t::Token) = t.endpos[2] - t.startpos[2] + 1
+
+function casedsavekeywords(code::AbstractString, casetransform=identity)
+    # replace "keyword" with "KEYWORD"
+    # Julia keywords https://docs.julialang.org/en/v1/base/base/#Keywords-1
+    keywords = [
+        "baremodule", "begin", "break", "catch", "const", "continue", "do", "else",
+        "elseif", "end", "export", "false", "finally", "for", "function", "global",
+        "if", "import", "let", "local", "macro", "module", "quote", "return", "struct",
+        "true", "try", "using", "while",
+    ]
+    exportednamesuppercase = [
+"ARGS", "BLAS", "C_NULL", "DEPOT_PATH", "ENDIAN_BOM", "ENV", "GC", "HTML", "I", "IO",
+"LAPACK", "LOAD_PATH", "LQ", "LU", "MIME", "PROGRAM_FILE", "QR", "SVD", "VERSION"
+    ]
+
+    exportednamesmixedcase = [
+"AbstractArray", "AbstractChannel", "AbstractChar", "AbstractDict", "AbstractDisplay",
+"AbstractFloat", "AbstractIrrational", "AbstractMatrix", "AbstractRange", "AbstractSet",
+"AbstractSparseArray", "AbstractSparseMatrix", "AbstractSparseVector", "AbstractString",
+"AbstractUnitRange", "AbstractVecOrMat", "AbstractVector", "Adjoint", "Any",
+"ArgumentError", "Array", "AssertionError", "Base", "Bidiagonal", "BigFloat", "BigInt",
+"BitArray", "BitMatrix", "BitSet", "BitVector", "Bool", "BoundsError", "Broadcast",
+"BunchKaufman", "CapturedException", "CartesianIndex", "CartesianIndices", "Cchar",
+"Cdouble", "Cfloat", "Channel", "Char", "Cholesky", "CholeskyPivoted", "Cint", "Cintmax_t",
+"Clong", "Clonglong", "Cmd", "Colon", "Complex", "ComplexF16", "ComplexF32", "ComplexF64",
+"CompositeException", "Condition", "Core", "Cptrdiff_t", "Cshort", "Csize_t", "Cssize_t",
+"Cstring", "Cuchar", "Cuint", "Cuintmax_t", "Culong", "Culonglong", "Cushort", "Cvoid",
+"Cwchar_t", "Cwstring", "DataType", "DenseArray", "DenseMatrix", "DenseVecOrMat",
+"DenseVector", "Diagonal", "Dict", "DimensionMismatch", "Dims", "DivideError", "Docs",
+"DomainError", "Eigen", "Enum", "EOFError", "ErrorException", "Exception",
+"ExponentialBackOff", "Expr", "Factorization", "Float16", "Float32", "Float64", "Function",
+"GeneralizedEigen", "GeneralizedSchur", "GeneralizedSVD", "GlobalRef", "Hermitian",
+"Hessenberg", "IdDict", "IndexCartesian", "IndexLinear", "IndexStyle", "InexactError",
+"Inf", "Inf16", "Inf32", "Inf64", "InitError", "InsertionSort", "Int", "Int128", "Int16",
+"Int32", "Int64", "Int8", "Integer", "InteractiveUtils", "InterruptException",
+"InvalidStateException", "IOBuffer", "IOContext", "IOStream", "Irrational", "Iterators",
+"KeyError", "LAPACKException", "LDLt", "Libc", "LinearAlgebra", "LinearIndices",
+"LineNumberNode", "LinRange", "LoadError", "LowerTriangular", "MathConstants", "Matrix",
+"MergeSort", "Meta", "Method", "MethodError", "Missing", "MissingException", "Module",
+"NamedTuple", "NaN", "NaN16", "NaN32", "NaN64", "Nothing", "NTuple", "Number",
+"OrdinalRange", "OutOfMemoryError", "OverflowError", "Pair", "PartialQuickSort",
+"PermutedDimsArray", "Pipe", "PipeBuffer", "PosDefException", "ProcessFailedException",
+"Ptr", "QRPivoted", "QuickSort", "QuoteNode", "RankDeficientException", "Rational", "RawFD",
+"ReadOnlyMemoryError", "Real", "ReentrantLock", "Ref", "Regex", "RegexMatch", "RoundDown",
+"RoundFromZero", "RoundingMode", "RoundNearest", "RoundNearestTiesAway",
+"RoundNearestTiesUp", "RoundToZero", "RoundUp", "Schur", "SegmentationFault", "Set",
+"Signed", "SingularException", "Some", "SparseArrays", "SparseMatrixCSC", "SparseVector",
+"StackOverflowError", "StackTraces", "StepRange", "StepRangeLen", "StridedArray",
+"StridedMatrix", "StridedVecOrMat", "StridedVector", "String", "StringIndexError",
+"SubArray", "SubstitutionString", "SubString", "Symbol", "Symmetric", "SymTridiagonal",
+"Sys", "SystemError", "Task", "TaskFailedException", "Text", "TextDisplay", "Threads",
+"Timer", "Transpose", "Tridiagonal", "Tuple", "Type", "TypeError", "TypeVar", "UInt",
+"UInt128", "UInt16", "UInt32", "UInt64", "UInt8", "UndefInitializer", "UndefKeywordError",
+"UndefRefError", "UndefVarError", "UniformScaling", "Union", "UnionAll",
+"UnitLowerTriangular", "UnitRange", "UnitUpperTriangular", "Unsigned", "UpperHessenberg",
+"UpperTriangular", "Val", "Vararg", "VecElement", "VecOrMat", "Vector", "VersionNumber",
+"WeakKeyDict", "WeakRef", "ZeroPivotException"
+    ]
+
+    exportednameslowercase = [
+"abs", "abs2", "abspath", "abstract", "accumulate", "acos", "acosd", "acosh", "acot",
+"acotd", "acoth", "acsc", "acscd", "acsch", "adjoint", "all", "allunique", "angle", "ans",
+"any", "applicable", "apropos", "argmax", "argmin", "ascii", "asec", "asecd", "asech",
+"asin", "asind", "asinh", "asyncmap", "atan", "atand", "atanh", "atexit", "atreplinit",
+"axes", "backtrace", "baremodule", "basename", "begin", "big", "bind", "binomial",
+"bitreverse", "bitrotate", "bitstring", "blockdiag", "break", "broadcast", "bswap",
+"bunchkaufman", "bytes2hex", "bytesavailable", "cat", "catch", "catch_backtrace", "cbrt",
+"ccall", "cd", "ceil", "cglobal", "checkbounds", "checkindex", "chmod", "cholesky", "chomp",
+"chop", "chown", "circshift", "cis", "clamp", "cld", "clipboard", "close", "cmp",
+"coalesce", "code_llvm", "code_lowered", "code_native", "codepoint", "code_typed",
+"codeunit", "codeunits", "code_warntype", "collect", "complex", "cond", "condskeel", "conj",
+"const", "contains", "continue", "convert", "copy", "copysign", "cos", "cosc", "cosd",
+"cosh", "cospi", "cot", "cotd", "coth", "count", "countlines", "count_ones", "count_zeros",
+"cp", "cross", "csc", "cscd", "csch", "ctime", "cumprod", "cumsum", "current_task",
+"deepcopy", "deg2rad", "denominator", "det", "detach", "devnull", "diag", "diagind",
+"diagm", "diff", "digits", "dirname", "disable_sigint", "display", "displayable",
+"displaysize", "div", "divrem", "do", "dot", "download", "dropdims", "dropzeros", "dump",
+"eachcol", "eachindex", "eachline", "eachmatch", "eachrow", "eachslice", "edit", "eigen",
+"eigmax", "eigmin", "eigvals", "eigvecs", "else", "elseif", "eltype", "empty", "end",
+"endswith", "enumerate", "eof", "eps", "error", "esc", "escape_string", "eval", "evalfile",
+"evalpoly", "exit", "exp", "exp10", "exp2", "expanduser", "expm1", "exponent", "export",
+"extrema", "factorial", "factorize", "false", "falses", "fd", "fdio", "fetch", "fieldcount",
+"fieldname", "fieldnames", "fieldoffset", "fieldtype", "fieldtypes", "filemode", "filesize",
+"fill", "filter", "finalize", "finalizer", "finally", "findall", "findfirst", "findlast",
+"findmax", "findmin", "findnext", "findnz", "findprev", "first", "firstindex", "fld",
+"fld1", "fldmod", "fldmod1", "flipsign", "float", "floatmax", "floatmin", "floor", "flush",
+"fma", "foldl", "foldr", "for", "foreach", "frexp", "fullname", "function", "functionloc",
+"gcd", "gcdx", "gensym", "get", "getfield", "gethostname", "getindex", "getkey", "getpid",
+"getproperty", "get_zero_subnormals", "givens", "global", "gperm", "hasfield", "hash",
+"haskey", "hasmethod", "hasproperty", "hcat", "hessenberg", "hex2bytes", "homedir", "htol",
+"hton", "hvcat", "hypot", "identity", "if", "ifelse", "ignorestatus", "im", "imag",
+"import", "in", "include", "include_dependency", "include_string", "indexin", "instances",
+"intersect", "inv", "invmod", "invoke", "invperm", "isa", "isabspath", "isabstracttype",
+"isapprox", "isascii", "isassigned", "isbits", "isbitstype", "isblockdev", "ischardev",
+"iscntrl", "isconcretetype", "isconst", "isdefined", "isdiag", "isdigit", "isdir",
+"isdirpath", "isdisjoint", "isdispatchtuple", "isempty", "isequal", "iseven", "isfifo",
+"isfile", "isfinite", "ishermitian", "isimmutable", "isinf", "isinteger", "isinteractive",
+"isless", "isletter", "islink", "islocked", "islowercase", "ismarked", "ismissing",
+"ismount", "ismutable", "isnan", "isnothing", "isnumeric", "isodd", "isone", "isopen",
+"ispath", "isperm", "isposdef", "ispow2", "isprimitivetype", "isprint", "ispunct", "isqrt",
+"isreadable", "isreadonly", "isready", "isreal", "issetequal", "issetgid", "issetuid",
+"issocket", "issorted", "isspace", "issparse", "issticky", "isstructtype", "issubnormal",
+"issubset", "issuccess", "issymmetric", "istaskdone", "istaskfailed", "istaskstarted",
+"istextmime", "istril", "istriu", "isuppercase", "isvalid", "iswritable", "isxdigit",
+"iszero", "iterate", "join", "joinpath", "keys", "keytype", "kill", "kron", "last",
+"lastindex", "lcm", "ldexp", "ldlt", "leading_ones", "leading_zeros", "length", "less",
+"let", "local", "lock", "log", "log10", "log1p", "log2", "logabsdet", "logdet", "lowercase",
+"lowercasefirst", "lowrankdowndate", "lowrankupdate", "lpad", "lq", "lstat", "lstrip",
+"ltoh", "lu", "lyap", "macro", "macroexpand", "map", "mapfoldl", "mapfoldr", "mapreduce",
+"mapslices", "mark", "match", "max", "maximum", "maxintfloat", "merge", "mergewith",
+"methods", "methodswith", "min", "minimum", "minmax", "missing", "mkdir", "mkpath",
+"mktemp", "mktempdir", "mod", "mod1", "mod2pi", "modf", "module", "mtime", "muladd",
+"mutable", "mv", "nameof", "names", "ncodeunits", "ndigits", "ndims", "nextfloat",
+"nextind", "nextpow", "nextprod", "nfields", "nnz", "nonmissingtype", "nonzeros", "norm",
+"normalize", "normpath", "nothing", "notify", "ntoh", "ntuple", "nullspace", "numerator",
+"nzrange", "objectid", "occursin", "oftype", "one", "ones", "oneunit", "only", "open",
+"operm", "opnorm", "ordschur", "pairs", "parent", "parentindices", "parentmodule", "parse",
+"partialsort", "partialsortperm", "pathof", "peakflops", "peek", "permute", "permutedims",
+"pi", "pinv", "pipeline", "pkgdir", "pointer", "pointer_from_objref", "popdisplay",
+"position", "powermod", "precision", "precompile", "__precompile__", "prevfloat", "prevind",
+"prevpow", "primitive", "print", "println", "printstyled", "process_exited",
+"process_running", "prod", "promote", "promote_rule", "promote_shape", "promote_type",
+"propertynames", "pushdisplay", "pwd", "qr", "quote", "rad2deg", "rand", "randn", "range",
+"rank", "rationalize", "read", "readavailable", "readchomp", "readdir", "readline",
+"readlines", "readlink", "readuntil", "real", "realpath", "redirect_stderr",
+"redirect_stdin", "redirect_stdout", "redisplay", "reduce", "reenable_sigint", "reim",
+"reinterpret", "relpath", "rem", "rem2pi", "repeat", "replace", "repr", "reset", "reshape",
+"rethrow", "retry", "return", "reverse", "reverseind", "rm", "rot180", "rotl90", "rotr90",
+"round", "rounding", "rowvals", "rpad", "rsplit", "rstrip", "run", "schedule", "schur",
+"searchsorted", "searchsortedfirst", "searchsortedlast", "sec", "secd", "sech", "seek",
+"seekend", "seekstart", "selectdim", "setdiff", "setenv", "setprecision", "setrounding",
+"set_zero_subnormals", "show", "showable", "showerror", "sign", "signbit", "signed",
+"significand", "similar", "sin", "sinc", "sincos", "sincosd", "sind", "sinh", "sinpi",
+"size", "sizeof", "skip", "skipchars", "skipmissing", "sleep", "something", "sort",
+"sortperm", "sortslices", "sparse", "sparsevec", "spdiagm", "split", "splitdir",
+"splitdrive", "splitext", "splitpath", "sprand", "sprandn", "sprint", "spzeros", "sqrt",
+"stacktrace", "startswith", "stat", "stderr", "stdin", "stdout", "step", "stride",
+"strides", "string", "strip", "struct", "struct", "subtypes", "success", "sum", "summary",
+"supertype", "supertypes", "svd", "svdvals", "sylvester", "symdiff", "symlink",
+"systemerror", "tan", "tand", "tanh", "task_local_storage", "tempdir", "tempname",
+"textwidth", "thisind", "throw", "time", "timedwait", "time_ns", "titlecase", "to_indices",
+"touch", "tr", "trailing_ones", "trailing_zeros", "transcode", "transpose", "tril", "triu",
+"true", "trues", "trunc", "truncate", "try", "trylock", "tryparse", "tuple", "type", "type",
+"typeassert", "typeintersect", "typejoin", "typemax", "typemin", "typeof", "undef",
+"unescape_string", "union", "unique", "unlock", "unmark", "unsafe_load",
+"unsafe_pointer_to_objref", "unsafe_read", "unsafe_string", "unsafe_trunc", "unsafe_wrap",
+"unsafe_write", "unsigned", "uperm", "uppercase", "uppercasefirst", "using", "valtype",
+"values", "varinfo", "vcat", "vec", "versioninfo", "view", "wait", "walkdir", "which",
+"while", "widemul", "widen", "withenv", "write", "xor", "yield", "yieldto", "zero", "zeros",
+"zip"
+    ]
+
+    if casetransform == uppercase
+        code = uppercase(code)
+        for k in exportednamesuppercase
+            code  = replace(code, Regex("\b"*k*"\b") => lowercase(k))
+        end
+        identifiers = collectidentifiers(collect(tokenize(code)))
+
+    elseif casetransform == lowercase
+        code = lowercase(code)
+        for k in keywords
+            code  = replace(code, Regex("\b"*k*"\b") => uppercase(k))
+        end
+        ts = collect(tokenize(code))
+        for k in exportednameslowercase
+            l = length(k)
+            for (i,t) in enumerate(ts)
+                if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
+                    ts[i] = @set t.val = uppercase(t.val)
+                end
+            end
+        end
+        identifiers = collectidentifiers(ts)
+        code = join(untokenize.(ts))
+
+    else
+        for k in keywords
+            code  = replace(code, Regex("\b"*k*"\b", "i") => uppercase(k))
+        end
+        ts = collect(tokenize(code))
+        for k in Iterators.flatten((exportednameslowercase, exportednamesmixedcase))
+            l = length(k)
+            for (i,t) in enumerate(ts)
+                if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
+                    ts[i] = @set t.val = uppercase(t.val)
+                end
+            end
+        end
+        identifiers = collectidentifiers(ts)
+        code = join(untokenize.(ts))
+    end
+
+    # suppress marks of strings like "STR98403iZjAcpPokM"
+    identifiers = filter(a->!occursin(Regex("STR\\d{7}"*mask()), a), identifiers)
+    identifiers = filter(a->!occursin(Regex("FMT\\d{7}"), a), identifiers)
+
+    vars = Dict{String, String}()
+    for i in identifiers
+        vars[uppercase(i)] = i
+    end
+    return code, vars
+end
+
 function savecomments(code, commentstrings, casetransform=identity)
 
-    rx = r"[ ]*#(?!CMMNT\d{10}).*(?:\t|)$" # spaces goes to comments
+    rx = r"[ ]*#(?!=?CMMNT\d{10}=?#?).*(?:\t|)$" # spaces goes to comments
     lines = splitonlines(code)
 
     for i in axes(lines,1)
@@ -532,7 +781,7 @@ function savecomments(code, commentstrings, casetransform=identity)
             key = @sprintf "CMMNT%05d%05d" i mod(hash(str), 2^16)
             commentstrings[key] = String(str)
             # case conversion while comments are detached
-            lines[i] = casetransform(replace(lines[i], m.match => s"")) * " #$key"
+            lines[i] = casetransform(replace(lines[i], m.match => s"")) * " #=$key=#"
         else
             # cut out all whitespaces not masked by the comments
             lines[i] = casetransform(replace(lines[i], r"[ ]*(\t|)$" => s"\1"))
@@ -542,29 +791,33 @@ function savecomments(code, commentstrings, casetransform=identity)
 end
 function restorecomments(code, commentstrings)
     for (k,v) in commentstrings
-        code = replace(code, Regex("[ ]?#?$k") => v)
+        code = replace(code, Regex("[ ]?#?=?$k=?#?") => v)
+    end
+    for (k,v) in commentstrings
+        code = replace(code, Regex("[ ]?#?=?$k=?#?") => v)
     end
     return code
 end
 
 """
+$(SIGNATURES)
 Convert lines continuations marks to "\t\r\t"
 """
 function replacecontinuationmarks(code::AbstractString, fortranfixedform)
 
-    code = replace(code, r"(?:&)([ ]*(?:#?CMMNT\d{10}|))(?:\n|\t\r\t)"m => SS("\\1\t\r\t"))
+    code = replace(code, r"(?:&)([ ]*(?:#?=?CMMNT\d{10}=?#?|))(?:\n|\t\r\t)"m => SS("\\1\t\r\t"))
     code = replace(code, r"(?:\t\r\t|\n)([ ]*)&"m => SS("\t\r\t\\1 "))
     fortranfixedform && (code = replace(code, r"[\n\r][ ]{5}\S"m => SS("\t\r\t      ")))
 
     # also include empty and commented lines inside the block of continued lines in:
     # free-form
-    rx = r"\t\r\t[ ]*(#?CMMNT\d{10}|)(\n[ ]*(#?CMMNT\d{10}|))*\n[ ]*(#?CMMNT\d{10}|)\t\r\t"m
+    rx = r"\t\r\t[ ]*(#?=?CMMNT\d{10}=?#?|)(\n[ ]*(#?=?CMMNT\d{10}=?#?|))*\n[ ]*(#?=?CMMNT\d{10}=?#?|)\t\r\t"m
     for m in reverse(collect(eachmatch(rx, code)))
         str = replace(m.match, r"\n" => SS("\t\r\t"))
         code = replace(code, m.match => str)
     end
     # fixed form
-    rx = r"\n[ ]*(#?CMMNT\d{10}|)\t\r\t"m
+    rx = r"\n[ ]*(#?=?CMMNT\d{10}=?#?|)\t\r\t"m
     while true
         matches = collect(eachmatch(rx, code))
         length(matches) > 0 || break
@@ -581,13 +834,13 @@ function collectformatstrings(code::AbstractString)
 
     # collect FORMAT(some,format,args)
     rx = r"^\h*\d+\h+format\h*\("mi
-    rxfmt = r"^(\h*(\d+)\h+format\h*)\(([^\n]*)\)(\h*#?CMMNT\d+|\h*)$"mi
+    rxfmt = r"^(\h*(\d+)\h+format\h*)\(([^\n]*)\)(\h*#?=?CMMNT\d{10}=?#?|\h*)$"mi
     for mx in reverse(collect(eachmatch(rx, code)))
         r = continuedlinesrange(code, mx.offset)
         str = stripcommentsbutlast(rstrip(concatcontinuedlines(code[r])))
         #str = replace(str, mask("''") => "''")
         m = match(rxfmt, str); fmt = m.captures[3]
-        key = @sprintf "FMT%06d" mod(hash(fmt), 2^19)
+        key = @sprintf "FMT%07d" mod(hash(fmt), 2^23)
         formatstrings[key] = fmt
         code = code[1:prevind(code,r[1])] * "$(m.captures[1])($key)$(m.captures[4])\n" *
                code[nextind(code,r[end]):end]
@@ -600,7 +853,7 @@ function collectformatstrings(code::AbstractString)
     for m in reverse(collect(eachmatch(rx, code)))
         str = String(m.match)
         #str = replace(m.match, mask("''") => "''")
-        key = @sprintf "FMT%06d" mod(hash(str), 2^19)
+        key = @sprintf "FMT%07d" mod(hash(str), 2^23)
         formatstrings[key] = str
         code = replace(code, m.match => key)
     end
@@ -643,9 +896,10 @@ end
 unmasklabels(code::AbstractString) = replace(code, r"(\n\h*)L(\d+):(\h+)"m => s"\1\2\3")
 
 """
+$(SIGNATURES)
 Simple names for Blocks structure fields indices
 """
-@enum Blocks blocktype=1 blockname=2 startline=3 lastline=4 content=5 parent=6 localvars=7 firstincluded=8
+@enum Blocks blocktype=1 blockname=2 startline=3 lastline=4 content=5 parent=6 localvars=7 localcommons=8 firstincluded=9
 Base.to_index(a::Blocks) = Int(a)
 Base.promote_rule(T::Type, ::Type{Blocks}) = T
 Base.convert(T::Type, a::Blocks) = T(Int(a))
@@ -653,11 +907,12 @@ for op in (:*, :/, :+, :-, :(:))
     @eval begin
         Base.$op(a::Number, b::Blocks) = $op(promote(a, b)...)
         Base.$op(a::Blocks, b::Number) = $op(promote(a, b)...)
-        #Base.$op(a::Blocks, b::Blocks) = Blocks($op(Int(a), Int(b)))
+        Base.$op(a::Blocks, b::Blocks) = Blocks($op(Int(a), Int(b)))
     end
 end
 
 """
+$(SIGNATURES)
 Split code text into the blocks of code corresponding each module, subroutine and so on.
 The resulted tree is flatted into Vector of the blocks and stored in the order of appearance.
 Blocks of code: ["BlockType", "BlockName", firstline, lastline, ["Code Text"], Ref(ParentBlock)]
@@ -668,9 +923,9 @@ function splitbyblocks(code, verbosity=0)
     lines .= rstrip.(stripcomments.(lines))
 
     # Initial blocks tree:
-    # [blocktype, blockname, blockbegin, blockend, TEXT, parent,
-    #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, vars, [...], [...], ], [...], ]
-    sourcetree = ["FILE", "", 1, length(lines), String[], nothing, nothing]
+    # [blocktype, blockname, blockbegin, blockend, TEXT, parent, vars, commons,
+    #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, vars, commons, [...], [...], ], [...], ]
+    sourcetree = ["FILE", "", 1, length(lines), String[], ntuple(_->nothing, Int(firstincluded-parent))...]
     i = 1
     while (b = markbyblock(lines, i)) !== nothing
         push!(sourcetree, b)
@@ -710,10 +965,11 @@ function markbyblock(lines, blockbegin)
     # split on: module | program | subroutine | function | blockdata
 
     # https://regex101.com/r/aWXhP4/6
-    rxbegin = r"^(?:\h*|)((?:(?:\w+(?:\*\w+|)\h+|)(?:recursive\h+|)(?!\bend)function|(?:recursive\h+|)(?!\bend)subroutine|program|block\h*data|(?!\bend)type|(?!\bend)type(?:\h*,\h*[\w\(\)]+)*|module(?!\h*procedure)))(?:(?:\h+|\h*::\h*)(\w+)).*$"mi
-    rxend = r"^(?:\h*|)(\bend(?:|function|subroutine|program|type|module)\b)(\h+\w+\b|).*$"mi
+    rxbegin = r"^(?:\h*|)(?:((?:(?:\w+(?:\*\w+|)\h+|)(?:RECURSIVE\h+|)(?!\bEND)FUNCTION|(?:RECURSIVE\h+|)(?!\bEND)SUBROUTINE|PROGRAM|BLOCK\h*DATA|(?!\bEND)TYPE|(?!\bEND)TYPE(?:\h*,\h*[\w\(\)]+)*|MODULE(?!\h*PROCEDURE)))(?:(?:\h+|\h*::\h*)(\w+)).*|(INTERFACE)\h*)$"mi
+    #rxbegin = r"^(?:\h*|)((?:(?:\w+(?:\*\w+|)\h+|)(?:recursive\h+|)(?!\bend)function|(?:recursive\h+|)(?!\bend)subroutine|program|block\h*data|(?!\bend)type|(?!\bend)type(?:\h*,\h*[\w\(\)]+)*|module(?!\h*procedure)))(?:(?:\h+|\h*::\h*)(\w+)).*$"mi
+    rxend = r"^(?:\h*|)(\bEND(?:|FUNCTION|SUBROUTINE|PROGRAM|TYPE|MODULE|INTERFACE)\b)(\h+\w+\b|).*$"mi
 
-    # ["BlockType", "BlockName", firstline, lastline, String[], [], [], [...], ]
+    # ["BlockType", "BlockName", firstline, lastline, String[], [], [], [], [...], ]
     blocks = Vector{Any}()
     headercatched = false
     lastnonempty = 1
@@ -723,10 +979,16 @@ function markbyblock(lines, blockbegin)
         i += n - 1 # skip multi-line
         if (m = match(rxbegin, l)) !== nothing
             if !headercatched
-                # https://regex101.com/r/YwQVzF/2
-                blocktype = uppercase(replace(m.captures[1], r"^[^,\n]*(\b\w+|type)(?:\h*,\h*[\h\w\(\)]+)*$"i=>s"\1"))
-                blockname = uppercase(m.captures[2])
-                append!(blocks, [blocktype, blockname, blockbegin, 0, String[], nothing, nothing])
+                if m.captures[1] !== nothing
+                    # https://regex101.com/r/YwQVzF/2
+                    blocktype = uppercase(replace(m.captures[1], r"^[^,\n]*(\b\w+|type)(?:\h*,\h*[\h\w\(\)]+)*$"i=>s"\1"))
+                    blockname = uppercase(m.captures[2])
+                elseif occursin(r"\bINTERFACE\b"i, m.captures[3])
+                    blocktype = "INTERFACE"
+                    blockname = "INTERFACE"
+                end
+                append!(blocks, [blocktype, blockname, blockbegin, 0, String[],
+                                 ntuple(_->nothing, Int(firstincluded-parent))...])
                 headercatched = true
             else
                 nextblockbegin = min(i, lastnonempty+1)
@@ -738,7 +1000,8 @@ function markbyblock(lines, blockbegin)
             if length(blocks) == 0
                 @debug lines[blockbegin:i]
                 @warn "Find only \"END\" without start of the program or subroutine"
-                append!(blocks, ["PROGRAM", mask("NAMELESSPROGRAM"), blockbegin, 0, String[], nothing, nothing])
+                append!(blocks, ["PROGRAM", mask("NAMELESSPROGRAM"), blockbegin, 0, String[],
+                                 ntuple(_->nothing, Int(firstincluded-parent))...])
             end
             blocks[lastline] = i
             return blocks
@@ -761,6 +1024,7 @@ end
 function splitbyblock!(blocks)
     for i in length(blocks):-1:Int(firstincluded)
         b = blocks[i]
+        b[blocktype] == "INTERFACE" && (b[blockname] = blocks[blockname]) # get name of parent
         ind = blocks[startline]
         b[content] = splice!(blocks[content], b[startline]-ind+1:b[lastline]-ind+1,
                        ["#=$(b[blocktype]):$(b[blockname]):$(b[startline]):$(b[lastline])=#"])
@@ -798,14 +1062,8 @@ end
 
 " Concatenate blocks of code and substitute code in place pointed by references comments "
 function mergeblocks(blocks, idx)
-    for m in reverse(collect(eachmatch(r"[\n]?\h*#=(\w+):(\w+):(\d+):(\d+)=#\h*[\n]?"mi, blocks[idx][content])))
+    for m in reverse(collect(eachmatch(r"[\n]?\h*#=(\w+):(\w+):(\d+):(\d+)=#\h*"mi, blocks[idx][content])))
         k = findblock(blocks, m.captures[1], m.captures[2], parse(Int,m.captures[3]), parse(Int,m.captures[4]))
-        #k = findfirst(blocks) do a
-        #    a[blocktype]      == m.captures[1] &&
-        #    a[blockname]      == m.captures[2] &&
-        #    "$(a[startline])" == m.captures[3] &&
-        #    "$(a[lastline])"  == m.captures[4]
-        #end
         blocks[idx][content] = replace(blocks[idx][content], m.match => '\n'*mergeblocks(blocks, k))
         splice!(blocks, k)
     end
@@ -890,10 +1148,10 @@ function collectvars(lines::AbstractVector, vars, verbosity=0)
     # `CH(:1)` or `CH(1:1)` thus any CHARACTER variable is an array
     append!(arrays, strings)
 
-    length(scalars) > 0 && @debug "scalars = \"$scalars\""
-    length(arrays)  > 0 && @debug "arrays  = \"$arrays\""
-    length(strings) > 0 && @debug "strings = \"$strings\""
-    length(vars)    > 0 && @debug "vars = \"$vars\""
+    verbosity > 0 && length(scalars) > 0 && @debug "scalars = \"$scalars\""
+    verbosity > 0 && length(arrays)  > 0 && @debug "arrays  = \"$arrays\""
+    verbosity > 0 && length(strings) > 0 && @debug "strings = \"$strings\""
+    verbosity > 1 && length(vars)    > 0 && @debug "vars = \"$vars\""
 
     # restore initial strings values
     for s in strings
@@ -931,8 +1189,8 @@ function parsevardeclstatement(line, ts, vars, commons, verbosity=0)
             end
             i += 1
         end
-        @debug common
-        commons[ts[3].val] = restore(common)
+        #@debug "common/$(ts[3].val)/ $(restore(common))"
+        commons[uppercase(ts[3].val)] = restore(common)
         decltype0 = restore(ts[2:4])
     elseif ts[1].val == "PARAMETER"
         @assert ts[2].kind == Tokens.LPAREN && ts[end-1].kind == Tokens.RPAREN
@@ -1163,7 +1421,8 @@ function collectlabels(lines::AbstractVector, verbosity=0)
 end
 
 """
-replace array's braces with square brackets
+$(SIGNATURES)
+Replace array's braces with square brackets
 """
 function replacearraysbrackets(code::AbstractString, arrays)
 
@@ -1194,7 +1453,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
     brackets = r"\[((?>[^\[\]]++|(?0))*)\]" # complementary brackets
 
     # trim line breaks after ':'
-    rx = r":\s*(#CMMNT\d{10}|)\t\r\t\h*"
+    rx = r":\s*(#=?CMMNT\d{10}=?#?|)\t\r\t\h*"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
@@ -1280,7 +1539,8 @@ function convertstrings(code::AbstractString)
 end
 
 """
-save and replace all strings with its hash
+$(SIGNATURES)
+Save and replace all strings with its hash
 """
 function savestrings(code::AbstractString, strings = OrderedDict{String, String}(); stringtype = "")
 
@@ -1288,7 +1548,7 @@ function savestrings(code::AbstractString, strings = OrderedDict{String, String}
     # https://regex101.com/r/q4fzK9/1
     rxstr = r"('((?>[^'\n]*|(?1))*)')"m
     for m in reverse(collect(eachmatch(rxstr, code)))
-        key = mask(@sprintf "STR%s" mod(hash("$(m.captures[1])"), 2^20))
+        key = mask(@sprintf "STR%07d" mod(hash("$(m.captures[1])"), 2^23))
         if length(m.captures[1]) > 3 || length(m.captures[1]) == 2
             strings[key] = stringtype * '"' * m.captures[2] * '"'
             code = replace(code, m.match => key)
@@ -1300,13 +1560,14 @@ function savestrings(code::AbstractString, strings = OrderedDict{String, String}
     end
     rxstr = r"(\"((?>[^\"\n]*|(?1))*)\")"m
     for m in reverse(collect(eachmatch(rxstr, code)))
-        key = mask(@sprintf "STR%s" mod(hash("$(m.captures[1])"), 2^20))
+        key = mask(@sprintf "STR%07d" mod(hash("$(m.captures[1])"), 2^23))
         strings[key] = stringtype * string(m.captures[1])
         code = replace(code, m.match => key)
     end
 
     # save empty strings ''
-    key = mask(@sprintf "STR%s" mod(hash("\"\""), 2^20))
+    key = mask(@sprintf "STR%07d" mod(hash("\"\""), 2^23))
+    #key = mask(@sprintf "STR%s" mod(hash("\"\""), 2^20))
     strings[key] = stringtype * "\"\""
     code = replace(code, mask("''") => key)
 
@@ -1320,7 +1581,7 @@ end
 function processiostatements(code::AbstractString, formatstrings)
 
     # collect LABEL FORMAT(FMT897348)
-    rx = r"^\h*(\d+)\h+format\h*\((FMT\d{6})\)"mi
+    rx = r"^\h*(\d+)\h+format\h*\((FMT\d{7})\)"mi
     formats = Dict{String,String}()
     for m in collect(eachmatch(rx, code))
         formats[m.captures[1]] = m.captures[2]
@@ -1344,7 +1605,7 @@ function processiostatements(code::AbstractString, formatstrings)
         elseif length(label) > 0
             @warn("IO format string in variable $label")
         else
-            formats[@sprintf "FMT%06d" mod(hash(fmt), 2^19)] = fmt
+            formats[@sprintf "FMT%07d" mod(hash(fmt), 2^23)] = fmt
         end
         fmt = convertformat(fmt)
         if  readwrite == "read" && (io == "5" || io == "*")
@@ -1414,7 +1675,7 @@ function parsereadwrite(str, pos)
             else
                 # this is the format string in the variable
                 formatvar = lex
-                #occursin(r"^FMT\d{6}$", lex) ||
+                #occursin(r"^FMT\d{7}$", lex) ||
                 #@warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
                 #      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, pos)]))\"\n")
             end
@@ -1547,7 +1808,8 @@ function convertformat(formatstring)
 end
 
 """
-split format string on tokens and apply repeats
+$(SIGNATURES)
+Split format string on tokens and apply repeats
 """
 function parseformat(formatstring)
     #@show formatstring
@@ -1578,7 +1840,7 @@ function insertabsentreturn(code::AbstractString)
     # find last return if exist. https://regex101.com/r/evx2Lu/13
     # else insert new one
     # Note: make a possessive regex for "ERROR: LoadError: PCRE.exec error: match limit exceeded"
-    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#?CMMNT\d+\s*|\s*)++)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#?CMMNT\d+\s*|\s*))$"mi
+    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#?=?CMMNT\d{10}=?#?\s*|\s*)++)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#?=?CMMNT\d{10}=?#?\s*|\s*))$"mi
     if (m = match(rx, code)) !== nothing
         code = replace(code, rx => SS("\\1$(mask("lastreturn"))\\3\\4"))
     elseif occursin(r"\bend[\h\r\n]*$"mi, code)
@@ -1597,27 +1859,27 @@ function processcommon(code::AbstractString, commons, arrays)
         #code = replace(code, Regex("\\b$(mask("lastreturn"))\\b") => SS("$(mask("return"))"))
         return code
     end
-    #lines = splitonlines(code)
 
     # @unpack COMMONs before use
-    rx = r"^([ ]*)common\h*\/\h*(\w+)\h*\/\h*"mi
+    rx = r"^([ ]*|)common\h*\/\h*(\w+)\h*\/[^\n]*"mi
+    #rx = r"^([ ]*|)common\h*\/\h*(\w+)\h*\/\h*"mi
     for m in reverse(collect(eachmatch(rx, code)))
-        if haskey(commons, m.captures[2])
+        if haskey(commons, uppercase(m.captures[2]))
             c1 = m.captures[1]; c2 = m.captures[2]
-            vars = commons[c2]
-            s = SS("$(c1)global $c2\n$c1$(mask('@'))unpack $(vars) = $c2\n$(m.match)")
+            vars = commons[uppercase(c2)]
+            s = SS("$(m.match)\n$(c1)global $c2\n$c1$(mask('@'))unpack $(vars) = $c2")
             code = replace(code, m.match => s)
         end
     end
 
     # @pack! 'COMMON's back before return
     packstr = "      $(mask('@'))label Lreturn\n"
-    for k in keys(commons)
-        # arrays don't needed because they should not be reallocated
-        v = split(commons[k], ',')
-        v = v[findall(a->lowercase(a) ∉ map(lowercase,arrays), v)]
+    for (k,v) in commons
+        # arrays don't needed because they should not be resized
+        v = split(v, ',')
+        v = filter(a->uppercase(a) ∉ arrays, v)
         if length(v) > 0
-            v = foldl((a,b)->a*','*' '*b, v)
+            v = foldl((a,b)->a*", "*b, v)
             packstr *= "      $(mask('@'))pack$(mask('!')) $(k) = $(v)\n"
         end
     end
@@ -1640,6 +1902,37 @@ function processcommon(code::AbstractString, commons, arrays)
     code = replace(code, Regex("\\b$(mask("lastreturn"))\\b") => SS("$(mask("return"))"))
 
     return code
+end
+
+function insertcommons(blocks, identifiers)
+    allcommons = Dict{String, String}()
+    allvars    = Dict{String, Var}()
+    for b in blocks
+        if b[localcommons] !== nothing
+            for (k,vars) in b[localcommons]
+                if haskey(allcommons, k) && allcommons[k] != vars
+                    @warn "The definition of vars in COMMON/$(k)/ is different " *
+                          "in $(b[blocktype]):$(b[blockname]) with previous one."
+                end
+                allcommons[k] = vars
+                for v in split(vars, ',')
+                    allvars[v] = b[localvars][v]
+                end
+            end
+        end
+    end
+    #@show allvars
+    def = ""
+    for (name, c) in allcommons
+        def *= "\n# COMMON /$(name)/ $(c)\n"
+        def *= "@static if !isdefined(@__MODULE__, :$(identifiers[name]))\n"
+        def *= "mutable struct $(identifiers[name])\n"
+        for v in split(c, ',')
+            def *= "    $(identifiers[v])::$(allvars[v].decl)\n"
+        end
+        def *= "end\nend\n"
+    end
+    return def
 end
 
 function commentoutdeclarations(code, commentstrings)
@@ -1777,7 +2070,7 @@ function parsedostatement(line)
             end
         elseif ttype == 'l'
                 lex, pos1 = taketoken(line, pos)
-                occursin(r"#?CMMNT\d{10}", lex) && break
+                occursin(r"#?=?CMMNT\d{10}=?#?", lex) && break
                 pos = pos1
         else
             pos = skiptoken(line, pos)
@@ -1862,7 +2155,8 @@ function replacedocontinue(code, dolabels, gotolabels; dontfixcontinue=false)
 end
 
 """
-replace conditional GOTOs with GOTOs in branch of julia's `if else` statements
+$(SIGNATURES)
+Replace conditional GOTOs with GOTOs in branch of julia's `if else` statements
 """
 function processconditionalgotos(code)
     # GOTO (10,20,30,40) SOMEEXPR
@@ -2178,10 +2472,10 @@ function processselectcase(code)
             expr = replace(lines[i], r"^\h*select\h*case\h*\((.*)\)(\h*#.*|\h*)$"mi => s"\1")
             if occursin(r"^[A-Za-z][A-Za-z0-9_]*$", expr)
                 var = expr
-                lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi => SS("\\1#\\2"))
+                lines[i] = replace(lines[i], r"^(\h*)(select\h*case.*)$"mi => SS("\\1#\\2"))
             else
                 var = @sprintf "EX%s" mod(hash("$(expr)"), 2^16)
-                lines[i] = replace(lines[i], r"^(\h*)(select\h+case.*)$"mi =>
+                lines[i] = replace(lines[i], r"^(\h*)(select\h*case.*)$"mi =>
                                              SS("\\1"*var*" = "*expr*" #\\2") )
             end
             case1 = true
@@ -2350,7 +2644,7 @@ function processlinescontinuation(code::AbstractString)
     # fix absent tabs
     code = replace(code, r"\t?(\n|\r)\t|\t(\n|\r)\t?" => SS("\t\r\t"))
     # move arithmetic operator from start of continuator to tail of previous line
-    rx = r"(\h*)(#?CMMNT\d{10}|)\t\r\t(\h*|)(\/\/|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)"
+    rx = r"(\h*)(#?=?CMMNT\d{10}=?#?|)\t\r\t(\h*|)(\/\/|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)"
     code = replace(code, rx => SS("\\4\\1\\2\t\r\t\\3"))
     return code
 end
@@ -2394,14 +2688,14 @@ end
 
 function concatlines(line1, line2)
     # comments will be stripped
-    return replace(line1, r"^(.*)(?:#?CMMNT\d{10}|)\t?$"m => s"\1") *
+    return replace(line1, r"^(.*)(?:#?=?CMMNT\d{10}=?#?|)\t?$"m => s"\1") *
            replace(line2, r"^\t?(.*)$"m => s"\1")
 end
 
 
 function splitoncomment(code)
-    rx = r"(?:#?CMMNT\d{10})"
-    #rx = r"(?=#?CMMNT\d{10})"
+    rx = r"(?:#?=?CMMNT\d{10}=?#?)"
+    #rx = r"(?=#?=?CMMNT\d{10}=?#?)"
     #rx = r"\h*#.*$"
     lines = splitonlines(code)
     comments  = ["" for i=axes(lines,1)]
@@ -2414,8 +2708,8 @@ function splitoncomment(code)
     return lines, comments
 end
 
-stripcomments(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?CMMNT\d{10}"m => "")
-stripcommentsbutlast(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?CMMNT\d{10}(?!\t?$)"m => "")
+stripcomments(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?=?CMMNT\d{10}=?#?"m => "")
+stripcommentsbutlast(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?=?CMMNT\d{10}=?#?(?!\t?$)"m => "")
 
 tostring(code::AbstractVector) =
     replace(foldl((a,b) -> a*'\n'*b, code),
@@ -2435,6 +2729,8 @@ sameasarg(like::AbstractString, lines::AbstractVector) = tostring(lines)
 const repairreplacements = OrderedDict(
     #??? # replace 'PRINT' => 'WRITE'
     #??? r"(PRINT)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)",
+    # replace 'PRINT' => 'WRITE'
+    r"(PRINT)\h*([*]|'\([^\n\)]+\)')\h*,"mi => s"write(*,\2)",
     # Goto
     r"^(\s*)GO\s*TO\s+(\d+)"mi => s"\1goto \2"  ,
     r"(\h)GO\s*TO\s+(\d+)"mi   => s"\1goto \2"  ,
@@ -2696,6 +2992,8 @@ const trivialreplacements = OrderedDict(
     r"\bbackspace\b\h+(\w+)"i  => s"seek(\1, position(\1)-1) # BACKSPACE \1",
     r"\brewind\b\h+(\w+)"i     => s"seek(\1, 0) # REWIND \1",
     r"\bend\h*file\b\h+(\w+)"i => s"seekend(\1) # ENDFILE \1",
+    # TODO: allocate, NULLIFY, ASSOCIATED
+    # see also "fortran.vim" for other Intrinsic and Keywords
 
     # TODO: to complete
     r"\bMPI_SEND\b\h*\("i  => "MPI.Send("   ,
@@ -2737,8 +3035,11 @@ const replacements = OrderedDict(
     # Replace ELSE with else
     r"^(\s*)\bELSE\b"m => s"\1else",
     # Relace END XXXX with end
-    r"^(\h*)END\h*(?:FUNCTION|(?:RECURSIVE\h+|)SUBROUTINE|PROGRAM|MODULE|TYPE|BLOCK|DO|IF|SELECT)\h*\w*$"mi => s"\1end",
-    r"^(\h*)END$"mi => s"\1end",
+    r"^(\h*|)END\h*(?:FUNCTION|(?:RECURSIVE\h+|)SUBROUTINE|PROGRAM|MODULE|INTERFACE|TYPE|BLOCK|DO|IF|SELECT)\h*\w*$"mi => s"\1end",
+    r"^(\h*|)\bEND\b"mi => s"\1end",
+    #r"^(\h*)END$"mi => s"\1end",
+    # INTERFACE => begin # INTERFACE
+    r"^(\h*|)(\bINTERFACE\b)"mi => s"\1begin # \2",
     # Don't need CALL
     r"([^ ])\bCALL\b(\h+)"i => s"\1 ",
     r"\bCALL\b(\h+)"i => s"",
@@ -2753,7 +3054,7 @@ const replacements = OrderedDict(
     r"\bSTOP\b\h+(\d+)"mi => s"exit(\1)",
     r"\bSTOP\b"mi => s"exit(1)",
     # Strings concatenation operator
-    r"//" => " * ",
+    r"//" => "*",
     # Format floats as "5.0" not "5."
     r"(\W\d+)\.(?=\D)" => s"\1.0",
     r"(\W\d+)\.$"m => s"\1.0",
@@ -3069,7 +3370,8 @@ function marktoken(str, i)
 end
 
 """
-take symbols till end of expression: ',' or ')'
+$(SIGNATURES)
+Take symbols till end of expression: ',' or ')'
 """
 function taketokenexpr(str, i)
     eos() = i>len; len = ncodeunits(str); i1 = i = thisind(str, i)
@@ -3103,6 +3405,7 @@ function skipwhitespaces(str, i)
 end
 
 """
+$(SIGNATURES)
 Return the last position of token of requested char
 """
 function skipupto(c, str, i)
