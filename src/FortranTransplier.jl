@@ -39,7 +39,13 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
     `FUNCTION f(x) RESULT(v)` can use as `f` as `v` as the returned value?
     parse DO...
     parse IF... ???
+    parse all `picktoken`
+    eval CHARACTER* size in COMMON => create `evalsize`
     insert running BLOCK DATA at startup in main()
+    we are need **CallTree** and then reassign COMMON with different vars names
+    try to `eval` expressions in COMMON blocks vars dimensions. This can be done on second pass.
+    Or create **IncludeTree** to improve files processing order.
+    modifying INCLUDE 'SOMETHING' to change extension
 
 
 
@@ -130,13 +136,14 @@ function main(args = String[])
     opts, fnames = parseargs(args)
     case = opts["--uppercase"] ? uppercase :
            opts["--lowercase"] ? lowercase : identity
+    verbosity = opts["--verbosity"]
 
     for fname in fnames
-        opts["--verbosity"] > 1 && println()
-        opts["--verbosity"] > 0 && println("$(fname):")
+        verbosity > 1 && println()
+        verbosity > 0 && println("$(fname):")
         code = open(fname) |> read |> String
         result = convert_fortran(code, casetransform=case, quiet=opts["--quiet"],
-                                 verbosity=opts["--verbosity"], double=opts["--double"], greeks=opts["--greeks"],
+                                 verbosity=verbosity, double=opts["--double"], greeks=opts["--greeks"],
                                  subscripts=opts["--subscripts"], greeksubscripts=opts["--greeksubscripts"])
         opts["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
         if opts["--formatting"]
@@ -144,7 +151,7 @@ function main(args = String[])
                 result = JuliaFormatter.format_text(result, margin = 192)
                 opts["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
             catch
-                @info("$(splitext(fname)[1] * ".jl")\nFORMATTING IS NOT SUCCESSFULL\n")
+                @info("$(splitext(fname)[1] * ".jl")\nFormatting is not successfull\n")
             end
         end
     end
@@ -294,8 +301,8 @@ function convert_fortran(code; casetransform=identity, quiet=true,
 
     # some simple fixes and conversions
     isfixedformfortran && (code = masklabels(code))
-    #write("test1.jl", code)
     code = foldl(replace, collect(repairreplacements), init=code)
+    #write("test1.jl", code)
     code = double ? foldl(replace, collect(FP64replacements), init=code) :
                     foldl(replace, collect(FPreplacements), init=code)
     #write("test2.jl", code)
@@ -324,9 +331,7 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
         scalars, arrays, stringvars, commons, vars = collectvars(lines, vars, verbosity)
         blocks[i][localvars] = vars
-        #blocks[i][localvars] = copy(vars)
         blocks[i][localcommons] = commons
-        #commons = collectcommon(lines)
         dolabels, gotolabels = collectlabels(lines, verbosity)
 
         verbosity > 2 && length(gotolabels) > 0 && println("     labels : $gotolabels")
@@ -391,6 +396,7 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         lines, comments = splitoncomment(code)
 
         #write("test1.jl", tostring(lines))
+        #write("test-$(b[1])-$(b[2])-$(b[3])-$(b[4]).jl", tostring(lines))
         # remains straight syntax conversions
         for rx in replacements
             lines = map(a->replace(a, rx), lines)
@@ -915,7 +921,7 @@ end
 $(SIGNATURES)
 Split code text into the blocks of code corresponding each module, subroutine and so on.
 The resulted tree is flatted into Vector of the blocks and stored in the order of appearance.
-Blocks of code: ["BlockType", "BlockName", firstline, lastline, ["Code Text"], Ref(ParentBlock)]
+Blocks of code: ["BlockType", "BlockName", firstline, lastline, ["Code Text"], signature(ParentBlock)]
 """
 function splitbyblocks(code, verbosity=0)
 
@@ -948,7 +954,7 @@ function splitbyblocks(code, verbosity=0)
 
     for b in flatted
         k = findblock(flatted, b[parent])
-        k !== nothing && (b[parent] = k)
+        b[parent] = k !== nothing ? k : nothing
     end
 
     #if verbosity > 2
@@ -1028,7 +1034,7 @@ function splitbyblock!(blocks)
         ind = blocks[startline]
         b[content] = splice!(blocks[content], b[startline]-ind+1:b[lastline]-ind+1,
                        ["#=$(b[blocktype]):$(b[blockname]):$(b[startline]):$(b[lastline])=#"])
-        b[parent] = Ref(blocks)
+        b[parent] = "#=$(blocks[blocktype]):$(blocks[blockname]):$(blocks[startline]):$(blocks[lastline])=#"
         blocks[i] = splitbyblock!(blocks[i])
     end
     return blocks
@@ -1052,13 +1058,12 @@ function findblock(blocks, type, name, i1, i2)
     end
     return k
 end
-function findblock(blocks, c::Union{Ref,Nothing})
-    if c !== nothing
-        return findblock(blocks, c[][blocktype], c[][blockname], c[][startline], c[][lastline])
-    else
-        return nothing
-    end
+function findblock(blocks, s::AbstractString)
+    m = match(r"[\n]?\h*#=(\w+):(\w+):(\d+):(\d+)=#\h*"mi, s)
+    return m === nothing ? nothing :
+        findblock(blocks, m.captures[1], m.captures[2], parse(Int,m.captures[3]), parse(Int,m.captures[4]))
 end
+findblock(blocks, c::Nothing) = nothing
 
 " Concatenate blocks of code and substitute code in place pointed by references comments "
 function mergeblocks(blocks, idx)
@@ -1086,7 +1091,10 @@ mutable struct Var
     name::String
     dim::String
     val::String
+    type::Any
 end
+(::Type{Var})(decl, name, dim, val) = Var(decl, name, dim, val, 0)
+
 function Base.show(io::IO, v::Var)
     val = isempty(v.val) ? "" : "=$(v.val)"
     dim = isempty(v.dim) ? "" : "($(v.dim))"
@@ -1094,6 +1102,11 @@ function Base.show(io::IO, v::Var)
     return
 end
 
+@static if @isdefined AbstractFortranString
+    const AbstractStringsTypes = Union{AbstractString, AbstractFortranString}
+else
+    const AbstractStringsTypes = AbstractString
+end
 
 function collectvars(lines::AbstractVector, vars, verbosity=0)
 
@@ -1107,7 +1120,8 @@ function collectvars(lines::AbstractVector, vars, verbosity=0)
     end
 
     declkeywords = ("DIMENSION", "INTEGER", "LOGICAL", "CHARACTER", "REAL", "COMPLEX",
-                    "DOUBLEPRECISION", "INTENT", "TYPE", "EXTERNAL", "PARAMETER", "COMMON" )
+                    "DOUBLECOMPLEX", "DOUBLEPRECISION", "INTENT", "TYPE", "EXTERNAL",
+                    "PARAMETER", "COMMON" )
 
     matched90 = Dict{Int,Any}()
     matched   = Dict{Int,Any}()
@@ -1189,7 +1203,6 @@ function parsevardeclstatement(line, ts, vars, commons, verbosity=0)
             end
             i += 1
         end
-        #@debug "common/$(ts[3].val)/ $(restore(common))"
         commons[uppercase(ts[3].val)] = restore(common)
         decltype0 = restore(ts[2:4])
     elseif ts[1].val == "PARAMETER"
@@ -1255,7 +1268,7 @@ function parsevardeclstatement(line, ts, vars, commons, verbosity=0)
             end
             k = uppercase(varname)
             if haskey(vars, k)
-                vars[k].decl *= (isempty(vars[k].decl) ? "" : ",") * decltype
+                vars[k].decl = join(unique(sort(push!(split(vars[k].decl, ','), decltype))), ',')
                 isempty(vars[k].dim) && (vars[k].dim = dim)
                 isempty(vars[k].val) && (vars[k].val = val)
             else
@@ -1334,8 +1347,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
             end
             k = uppercase(varname)
             if haskey(vars, k)
-                vars[k].decl *= (isempty(vars[k].decl) ? "" : ",") * decltype
-                #isempty(vars[k].dim) && (vars[k].dim = dim)
+                vars[k].decl = join(unique(sort(push!(split(vars[k].decl, ','), decltype))), ',')
                 !isempty(dim) && (vars[k].dim = dim)
                 isempty(vars[k].val) && (vars[k].val = val)
             else
@@ -1349,24 +1361,6 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
     end
 
     return vars
-end
-
-function collectcommon(lines::AbstractVector)
-    rx = r"^\h*common\h*\/\h*(\w+)\h*\/\h*(.+)"mi
-    matched = Dict{String,String}()
-    for i in axes(lines,1)
-        if (m = match(rx, lines[i])) !== nothing
-            matched[m.captures[1]] = m.captures[2]
-        end
-    end
-    rxbr = r"(\(((?>[^()]++|(?1))*)\))" # https://regex101.com/r/inyyeW/2
-    rxsqbr = r"(\[((?>[^\[\]]++|(?1))*)\])"
-    for i in keys(matched)
-        matched[i] = replace(matched[i], r"[ \t\n\r]" => s"")   # drop spaces
-        matched[i] = replace(matched[i], rxsqbr => s"")         # drop braces
-        matched[i] = replace(matched[i], rxbr => s"")           # drop braces
-    end
-    return matched
 end
 
 function collectlabels(lines::AbstractVector, verbosity=0)
@@ -1905,14 +1899,21 @@ function processcommon(code::AbstractString, commons, arrays)
 end
 
 function insertcommons(blocks, identifiers)
+    #for b in blocks
+    #    if b[localvars] !== nothing
+    #        for (k,v) in b[localvars]
+    #            evaltype!(b[localvars][k])
+    #        end
+    #    end
+    #end
     allcommons = Dict{String, String}()
     allvars    = Dict{String, Var}()
     for b in blocks
         if b[localcommons] !== nothing
             for (k,vars) in b[localcommons]
                 if haskey(allcommons, k) && allcommons[k] != vars
-                    @warn "The definition of vars in COMMON/$(k)/ is different " *
-                          "in $(b[blocktype]):$(b[blockname]) with previous one."
+                    @warn "The definition of variables in COMMON/$(k)/ is differs " *
+                          "in $(b[blocktype]):$(b[blockname]) with the previous one."
                 end
                 allcommons[k] = vars
                 for v in split(vars, ',')
@@ -1925,14 +1926,69 @@ function insertcommons(blocks, identifiers)
     def = ""
     for (name, c) in allcommons
         def *= "\n# COMMON /$(name)/ $(c)\n"
-        def *= "@static if !isdefined(@__MODULE__, :$(identifiers[name]))\n"
-        def *= "mutable struct $(identifiers[name])\n"
+        def *= "@static if !@isdefined($(identifiers[name])_COMMON_STRUCT)\n"
+        #def *= "@static if !isdefined(@__MODULE__, :$(identifiers[name])_COMMON_STRUCT)\n"
+        def *= "@with_kw mutable struct $(identifiers[name])_COMMON_STRUCT\n"
         for v in split(c, ',')
-            def *= "    $(identifiers[v])::$(allvars[v].decl)\n"
+            t = evaltype(allvars[v])
+            val = t<:AbstractStringsTypes ? " = ' '^$(evalsize(allvars[v]))" : ""
+            def *= "    $(identifiers[v])::$(t)$(val)\n"
         end
         def *= "end\nend\n"
+        def *= "\n#$(identifiers[name]) = $(identifiers[name])_COMMON_STRUCT()\n\n"
     end
     return def
+end
+
+function evaltype(v::Var)
+    # TODO: eval Fortran90: REAL(KIND=SomeThing)
+    # yet ugly
+    type = Int
+    decl = v.decl
+    if occursin(r"(?:^|,)CHARACTER", decl)
+        type = String
+    elseif occursin(r"(?:^|,)COMPLEX\*16(?:,|$)", decl) || occursin(r"(?:^|,)DOUBLECOMPLEX(?:,|$)", decl)
+        type = ComplexF64
+    elseif occursin(r"(?:^|,)COMPLEX\*8(?:,|$)", decl) || occursin(r"(?:^|,)COMPLEX(?:,|$)", decl)
+        type = ComplexF32
+    elseif occursin(r"(?:^|,)DOUBLEPRECISION(?:,|$)", decl) || occursin(r"(?:^|,)REAL\*8(?:,|$)", decl)
+        type = Float64
+    elseif occursin(r"(?:^|,)REAL\*4(?:,|$)", decl) || occursin(r"(?:^|,)REAL(?:,|$)", decl)
+        type = Float32
+    elseif occursin(r"(?:^|,)INTEGER\*8(?:,|$)", decl)
+        type = Int
+    elseif occursin(r"(?:^|,)INTEGER\*4(?:,|$)", decl) || occursin(r"(?:^|,)INTEGER(?:,|$)", decl)
+        type = Int32
+    elseif occursin(r"(?:^|,)INTEGER\*2(?:,|$)", decl)
+        type = Int16
+    elseif occursin(r"(?:^|,)INTEGER\*1(?:,|$)", decl)
+        type = Int8
+    elseif occursin(r"(?:^|,)LOGICAL(?:,|$)", decl)
+        type = Bool
+    end
+    if !isempty(v.dim)
+        naxes = count(l->l==',', v.dim) + 1
+        type = Array{type, naxes}
+        #type = "Array{$type, $naxes}"
+    end
+    return type
+end
+evaltype!(v::Var)  = v.type = evaltype(v)
+
+function evalsize(v::Var)
+    size = ""
+    if evaltype(v) <: AbstractStringsTypes
+        if (m = occursin(r"(?:^|,)CHARACTER\*(\d+)(?:,|$)", v.decl)) !== nothing
+            size = m.captures[1]
+        elseif (m = occursin(r"(?:^|,)CHARACTER\*?\(LEN=(\d+)\)(?:,|$)", v.decl)) !== nothing
+            size = m.captures[1]
+        elseif (m = occursin(r"(?:^|,)CHARACTER\*?\((.*)\)(?:,|$)", v.decl)) !== nothing
+            size = m.captures[1]
+        elseif (m = occursin(r"^LEN=(\d+)$", v.dim)) !== nothing
+            size = m.captures[1]
+        end
+    end
+    return size
 end
 
 function commentoutdeclarations(code, commentstrings)
@@ -1948,6 +2004,9 @@ function commentoutdeclarations(code, commentstrings)
         r"^\h*double\h*precision(?!.*parameter).*::"mi,
         r"^\h*double\h*precision\h*$"mi,
         r"^\h*double\h*precision\h+(?!.*function)"mi,
+        r"^\h*double\h*complex(?!.*parameter).*::"mi,
+        r"^\h*double\h*complex\h*$"mi,
+        r"^\h*double\h*complex\h+(?!.*function)"mi,
         r"^\h*complex(?!.*parameter).*::"mi,
         r"^\h*complex\h*$"mi,
         r"^\h*complex\h+(?!.*function)"mi,
@@ -2741,6 +2800,7 @@ const repairreplacements = OrderedDict(
     r"(?<!\*)\*\*(?!\*)"m => s"^",
     # spaces in keywords
     r"\bDOUBLE\b\h+\bPRECISION\b"mi => "DOUBLEPRECISION",
+    r"\bDOUBLE\b\h+\bCOMPLEX\b"mi   => "DOUBLECOMPLEX",
     r"\bDO\b\h+\bWHILE\b"mi         => "DOWHILE",
     r"\bELSE\b\h+\bIF\b"mi          => "ELSEIF",
     r"\bSELECT\b\h+\bCASE\b"mi      => "SELECTCASE",
@@ -2787,26 +2847,26 @@ const FPreplacements = OrderedDict(
     # fix floating point numbers with exponent
     # spaces in numbers into underscores "1 000 E3" => "1_000E3"
     r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1@\2",  # '@' will be restored later
-    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][-+]?\d+)?\b)"m   => s"\1@\2",
-    r"(?<!\*)(\b\d+)[ ]+([eEdD][-+]?\d+\b)"m           => s"\1\2",
-    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([-+]?\d+))?\b)"m   => s"\1@\3f\4",
-    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([-+]?\d+))?\b)"m   => s"\1@\3e\4",
-    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([-+]?\d+))?\b)"m   => s"\1@\3E\4",
-    #r"(\b\d+)[ ]+[eEdD]([-+]?\d+\b)"m           => s"\1f\2",
-    #r"(\b\d+)[ ]+[eEdD]([-+]?\d+\b)"m           => s"\1e\2",
-    #r"(\b\d+)[ ]+[eEdD]([-+]?\d+\b)"m           => s"\1E\2",
+    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][+-]?\d+)?\b)"m   => s"\1@\2",
+    r"(?<!\*)(\b\d+)[ ]+([eEdD][+-]?\d+\b)"m           => s"\1\2",
+    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([+-]?\d+))?\b)"m   => s"\1@\3f\4",
+    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([+-]?\d+))?\b)"m   => s"\1@\3e\4",
+    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([+-]?\d+))?\b)"m   => s"\1@\3E\4",
+    #r"(\b\d+)[ ]+[eEdD]([+-]?\d+\b)"m           => s"\1f\2",
+    #r"(\b\d+)[ ]+[eEdD]([+-]?\d+\b)"m           => s"\1e\2",
+    #r"(\b\d+)[ ]+[eEdD]([+-]?\d+\b)"m           => s"\1E\2",
     # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
-    r"(\d)\.([/*+-])"               => s"\1.0\2",
+    r"(\d)\.([/*+_-])"               => s"\1.0\2",
     # 1.D0 https://regex101.com/r/RRHEyN/4
-    r"([-+]?[0-9]+)\.([eEdD][-+]?[0-9]+)"      => s"\1.0\2",
-    # custom precision floats: "1.0e+3_MY_SUPER_FLOAT" => "MY_SUPER_FLOAT(1.0e+3)"
-    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
-    #r"([-+]?[0-9]*\.?[0-9]+(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    r"([+-]?[0-9]+)\.([eEdD][+-]?[0-9]+)"      => s"\1.0\2",
+    # custom precision floats: "1.0e+3_MY_SUPER_PRECISION" => "MY_SUPER_PRECISION(1.0e+3)"
+    r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    #r"([+-]?[0-9]*\.?[0-9]+(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
     r"(\d)@(\d)"                                           => s"\1_\2",
     # https://regex101.com/r/RRHEyN/2
-    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([-+]?[0-9]+))"m => s"\1f\2",
-    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([-+]?[0-9]+))"m => s"\1e\2",
-    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([-+]?[0-9]+))"m => s"\1E\2",
+    r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([+-]?[0-9]+))"m => s"\1f\2",
+    r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([+-]?[0-9]+))"m => s"\1e\2",
+    r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([+-]?[0-9]+))"m => s"\1E\2",
     # "a%b" => "a.b"
     r"(\b\w+)\h*%\h*(\w+\b)"m => s"\1.\2",
 )
@@ -2814,20 +2874,20 @@ const FP64replacements = OrderedDict(
     # fix floating point numbers with exponent
     # spaces in numbers into underscores "1 000 E3" => "1_000E3"
     r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1@\2",  # '@' will be restored later
-    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][-+]?\d+)?\b)"m   => s"\1@\2",
-    r"(?<!\*)(\b\d+)[ ]+([eEdD][-+]?\d+\b)"m           => s"\1\2",
+    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][+-]?\d+)?\b)"m   => s"\1@\2",
+    r"(?<!\*)(\b\d+)[ ]+([eEdD][+-]?\d+\b)"m           => s"\1\2",
     # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
-    r"(\d)\.([/*+-])"               => s"\1.0\2",
+    r"(\d)\.([/*+-_])"               => s"\1.0\2",
     # 1.D0 https://regex101.com/r/RRHEyN/4
-    r"([-+]?[0-9]+)\.([eEdD][-+]?[0-9]+)"      => s"\1.0\2",
-    # custom precision floats: "1.0e+3_MY_SUPER_FLOAT" => "MY_SUPER_FLOAT(1.0e+3)"
-    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
-    #r"([-+]?[0-9]*\.?[0-9]+(?:[fFeE][-+]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    r"([+-]?[0-9]+)\.([eEdD][+-]?[0-9]+)"      => s"\1.0\2",
+    # custom precision floats: "1.0e+3_MY_SUPER_PRECISION" => "MY_SUPER_PRECISION(1.0e+3)"
+    r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
+    #r"([+-]?[0-9]*\.?[0-9]+(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
     r"(\d)@(\d)"                                           => s"\1_\2",
     # https://regex101.com/r/RRHEyN/2
-    #r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([-+]?[0-9]+))"m => s"\1e\2",
-    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([-+]?[0-9]+))"m => s"\1e\2",
-    r"([-+]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([-+]?[0-9]+))"m => s"\1E\2",
+    #r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([+-]?[0-9]+))"m => s"\1e\2",
+    r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([+-]?[0-9]+))"m => s"\1e\2",
+    r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([+-]?[0-9]+))"m => s"\1E\2",
     # "a%b" => "a.b"
     r"(\b\w+)\h*%\h*(\w+\b)"m => s"\1.\2",
 )
@@ -3012,10 +3072,8 @@ const trivialreplacements = OrderedDict(
 )
 
 
-# Regex/substitution pairs for replace(). Order matters here.
+# Main syntax replacements. Order matters here.
 const replacements = OrderedDict(
-    # Powers use ^ not **
-    r"([^*\n])([*]{2})([^*])" => s"\1^\3",
     # constant arrays
     r"\(/" => s"[",
     r"/\)" => s"]",
@@ -3026,7 +3084,7 @@ const replacements = OrderedDict(
     # Replace "return\nend" => "return nothing\nend"
     r"(\h*)\bRETURN\b(\h+end|)$"i => s"\1return nothing\2",
     # include ESCAPEDSTR
-    r"^(\s*)INCLUDE\h+([\w]+)$"mi => s"\1include(\2)",
+    r"^(\s*)INCLUDE\h*([\w]+)[\h\r]*$"mi => s"\1include(\2)",
     # Replace do LABEL ... -> do ...
     r"for\h+(?:\d+)(\h+.*)$" => s"for\1",
     # Replace do while -> while
@@ -3037,7 +3095,6 @@ const replacements = OrderedDict(
     # Relace END XXXX with end
     r"^(\h*|)END\h*(?:FUNCTION|(?:RECURSIVE\h+|)SUBROUTINE|PROGRAM|MODULE|INTERFACE|TYPE|BLOCK|DO|IF|SELECT)\h*\w*$"mi => s"\1end",
     r"^(\h*|)\bEND\b"mi => s"\1end",
-    #r"^(\h*)END$"mi => s"\1end",
     # INTERFACE => begin # INTERFACE
     r"^(\h*|)(\bINTERFACE\b)"mi => s"\1begin # \2",
     # Don't need CALL
@@ -3055,10 +3112,6 @@ const replacements = OrderedDict(
     r"\bSTOP\b"mi => s"exit(1)",
     # Strings concatenation operator
     r"//" => "*",
-    # Format floats as "5.0" not "5."
-    r"(\W\d+)\.(?=\D)" => s"\1.0",
-    r"(\W\d+)\.$"m => s"\1.0",
-    r"(?<=\W)\.(\d+)"m => s"0.\1",
     # Goto
     r"^(\s*)GO\s*TO\s+(\d+)"mi => s"\1@goto L\2",
     r"(\h)GO\s*TO\s+(\d+)"mi => s"\1@goto L\2",
@@ -3067,8 +3120,8 @@ const replacements = OrderedDict(
     r"^(\h*\d+:?\h*|\h*)ASSIGN\h*(\d+)\h*TO\h*(\w+)$"i => s"\1\3 = \2",
     # fix end
     r"^(.+[^ ])[ ]([ ]+)END$" => s"\1 end\2",
-    # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
-    r"(\b(?!ELSEIF|IF)[\w_]+\b)[\h]+\("i => s"\1(",
+    #### remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
+    ###r"(\b(?!ELSEIF|IF)[\w_]+\b)[\h]+\("i => s"\1(",
     # Implicit declaration
     r"^\h*IMPLICIT(.*)"mi => s"",
     # returns
@@ -3076,7 +3129,7 @@ const replacements = OrderedDict(
     Regex("\\b$(mask("return"))\\b") => "return",
     r"\breturn\b$" => "return nothing",
     # main program
-    r"^(\h*)PROGRAM\h*$"mi => s"\1PROGRAM NAMELESSPROGRAM",
+    r"^(\h*|)PROGRAM\h*$"mi => s"\1PROGRAM NAMELESSPROGRAM",
     # rstrip()
     r"\h*$" => s"",
 )
@@ -3098,6 +3151,7 @@ const headersprocessing = OrderedDict(
     r"^(\h*|)real(?:\*\d{1,2})?\h*function\h+"mi         => s"\1function ",
     r"^(\h*|)complex(?:\*\d{1,2})?\h*function\h+"mi      => s"\1function ",
     r"^(\h*|)double\h*precision\h*function\h+"mi         => s"\1function ",
+    r"^(\h*|)double\h*complex\h*function\h+"mi         => s"\1function ",
     r"^(\h*|)integer(?:\*\d{1,2})?\h*function\h+"mi      => s"\1function ",
     r"^(\h*|)character(?:\*\d{1,2})?\h*function\h+"mi    => s"\1function ",
     r"^(\h*|)logical\h*function\h+"mi                    => s"\1function ",
