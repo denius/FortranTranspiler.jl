@@ -22,49 +22,49 @@ In Linux environment you can use it by `FortranTranspiler.jl *.f` if you drop `F
 
 Usage options `FortranTranspiler.jl --help`:
 ```
-    Transpiler¹ converts the FORTRAN77 and partly FORTRAN90 source code into Julia.
-    It uses the pipe of both parsing and naive Regex replacements to do as much as possible,
-    but the output may need to further refinement.
+Transpiler¹ converts the FORTRAN77 and partly FORTRAN90 source code into Julia.
+It uses the pipe of both parsing and naive Regex replacements to do as much as possible,
+but the output may need to further refinement.
 
-    Usage:
-        FortranTranspiler.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> <somedir> ...
-        FortranTranspiler.jl [--lowercase | --uppercase] ... [--] .
-        FortranTranspiler.jl -h | --help
+Usage:
+    FortranTranspiler.jl [--lowercase | --uppercase] ... [--] <filename1.f> <filename2.f> <somedir> ...
+    FortranTranspiler.jl [--lowercase | --uppercase] ... [--] .
+    FortranTranspiler.jl -h | --help
 
-    Samples:
-        FortranTranspiler.jl .
-        FortranTranspiler.jl somefile.f somedir
-        FortranTranspiler.jl *.f* *.F*
+Samples:
+    FortranTranspiler.jl .
+    FortranTranspiler.jl somefile.f somedir
+    FortranTranspiler.jl *.f* *.F*
 
-    Options:
-        -h, --help         Show this screen.
-        --version          Show version.
-        -q, --quiet        Suppress all console output.
-        -v, --verbose      Be verbose.
-        -vv, --verbose     Be more verbose.
-        -vvv, --verbose    Be yet more verbose.
-        --preserveext      Preserve files extensions (suffix), append .jl: SOMEFILE.f90.jl
-        --uppercase        Convert all identifiers to upper case.
-        --lowercase        Convert all identifiers to lower case.
-        --greeks           Replace the greek letter names thats starts the var names
-                           with the corresponding unicode symbol, like DELTA1 -> δ1.
-        --subscripts       Replace tail suffixes in vars names with unicode subscripts
-                           like SOMEVAR_1 => SOMEVAR₁, if exist. Can be applied few times.
-        --greeksubscripts  SOMEVAR_gamma => SOMEVARᵧ
-        --                 The rest of the args is only the filenames and dirs.
-        --formatting       Try to format with JuliaFormatter package.
-        --dontfixcontinue  Do not try to insert ommited CONTINUE in the ancient fortran DO LABEL loops.
-        --packarrays       Insert also Arrays in returned values.
-        --strings
-        --dropdeclarations
-        --indentcomments   Shift commentary strings from 1 column to more suitable place.
-        --double           Evaluate 1.0E0 as Float64, despite in fortran 1.0E0 is Float32.
-        --omitimplicit     Omit implicit scalars initialization.
-        -n, --dry-run      Make the processing but don't write output ".jl" files.
+Options:
+    -h, --help         Show this screen.
+    --version          Show version.
+    -q, --quiet        Suppress all console output.
+    -v, --verbose      Be verbose.
+    -vv, --verbose     Be more verbose.
+    -vvv, --verbose    Be yet more verbose.
+    --preserveext      Preserve files extensions (suffix), append .jl: SOMEFILE.f90.jl
+    --uppercase        Convert all identifiers to upper case.
+    --lowercase        Convert all identifiers to lower case.
+    --greeks           Replace the greek letter names thats starts the var names
+                       with the corresponding unicode symbol, like DELTA1 -> δ1.
+    --subscripts       Replace tail suffixes in vars names with unicode subscripts
+                       like SOMEVAR_1 => SOMEVAR₁, if exist. Can be applied few times.
+    --greeksubscripts  SOMEVAR_gamma => SOMEVARᵧ
+    --                 The rest of the args is only the filenames and dirs.
+    --formatting       Try to format with JuliaFormatter package.
+    --dontfixcontinue  Do not try to insert ommited CONTINUE in the ancient fortran DO LABEL loops.
+    --packarrays       Insert also Arrays in returned values.
+    --strings
+    --dropdeclarations
+    --indentcomments   Shift commentary strings from 1 column to more suitable place.
+    --double           Evaluate 1.0E0 as Float64, despite in fortran 1.0E0 is Float32.
+    --omitimplicit     Omit implicit scalars initialization.
+    -n, --dry-run      Make the processing but don't write output ".jl" files.
 
-    Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
+Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 
-    [^1]: [Source-to-source compiler](https://en.wikipedia.org/wiki/Source-to-source_compiler).
+[^1]: [Source-to-source compiler](https://en.wikipedia.org/wiki/Source-to-source_compiler).
 ```
 
 The options `--greeks`, `--subscripts` and `--greeksubscripts` are useful for
