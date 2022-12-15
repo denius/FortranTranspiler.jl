@@ -73,7 +73,7 @@ some converting of Fortran ASCII letters variables into pretty Unicode variable 
 The `-v` option (and so on) is used to show the internal working machinery and possible errors in sourced Fortran files.
 
 After processing, each resulting file will be tried on the Julia translator,
-and if the --quiet option is not specified, you can see the result of this.
+and if the `--quiet` option is not specified, you can see the result of this.
 
 There is especial option `--formatting`, it uses
 [JuliaFormatter.jl](https://github.com/domluna/JuliaFormatter.jl) to try to pretty format
