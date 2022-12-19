@@ -7,9 +7,9 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 #=
 
 # KNOWN ISSUES
-* julia's `for` loop counter is local scope variable, unlike fortran.
-  Thus the codes that use the value of counter after the loop will be broken
-  and should be fixed via set loop counter before `for` to afterlast value. May be fixed!
+#* julia's `for` loop counter is local scope variable, unlike fortran.
+#  Thus the codes that use the value of counter after the loop will be broken
+#  and should be fixed via set loop counter before `for` to afterlast value. May be fixed via `for outer i ...`
 * due to julia's GC, some implicit variables initialized inside the loop/ blocks
   may disappear upon they exit these blocks. Consider initilizing them with
   the appropriate value in the outer part of the function code.
@@ -27,12 +27,17 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 * implied do-loops are not always caught
 * pointers (`Ref`) do not work on primitive types
 * there is no OPENMP in Julia
+* imported LinearAlgebra.I is coalesce with classical variable `I`
 * OOP in Julia is not suitable for Fortran OOP, https://github.com/ipod825/OOPMacro.jl
   is not mature.
 
 # TODO
     ~~custom precision like `dzero=0.0_psb_dpk_, done=1.0_psb_dpk_` in psb_const_mod.F90~~
         and `INTEGER,PARAMETER :: RP = SELECTEDREALKIND(15)`
+
+    replace varnames with most used varnames (to exclude varians `N` and `n` in one function)
+
+    rename to continuation lines?
 
     few PROGRAMs in one file
 
@@ -43,6 +48,8 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
     RECURSIVE
 
     `FUNCTION f(x) RESULT(v)` can use as `f` as `v` as the returned value?
+
+    ~~parse IO...~~
 
     parse DO...
 
@@ -320,7 +327,7 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     code, commentstrings = savecomments(code, commentstrings)
     #write("test2.jl", code)
 
-    # convert lines continuations marks to "\t\r\t"
+    # convert fortrans lines continuations marks to "\t\r\t"
     code = replacecontinuationmarks(code, isfixedformfortran)
     #write("test1.jl", code)
 
@@ -360,16 +367,10 @@ function convert_fortran(code; casetransform=identity, quiet=true,
 
         # extract necessary information
         lines = splitonlines(concatcontinuedlines(stripcomments(code)))
-        scalars, arrays, stringvars, commons, vars = collectvars(lines, vars, verbosity)
-        blocks[i][localvars] = vars
+        scalars, arrays, stringvars, commons, blocks[i][localvars] = collectvars(lines, vars, verbosity)
         blocks[i][localcommons] = commons
         dolabels, gotolabels = collectlabels(lines, verbosity)
-
-        verbosity > 2 && length(gotolabels) > 0 && println("     labels : $gotolabels")
-        verbosity > 2 && length(dolabels) > 0   && println("   dolabels : $dolabels")
-        verbosity > 2 && length(scalars) > 0    && println("    scalars : $scalars")
-        verbosity > 2 && length(arrays) > 0     && println("    arrays  : $arrays")
-        verbosity > 2 && length(commons) > 0    && println("    COMMONs : $commons")
+        verbosity > 2 && printvariables(scalars, arrays, commons, gotolabels, dolabels)
 
         # replace array's parentheses with square brackets
         #write("test1.jl", code)
@@ -712,6 +713,15 @@ function printformatstrings(formatstrings)
     return nothing
 end
 
+function printvariables(scalars, arrays, commons, gotolabels, dolabels)
+    length(gotolabels) > 0 && println("     labels : $gotolabels")
+    length(dolabels) > 0   && println("   dolabels : $dolabels")
+    length(scalars) > 0    && println("    scalars : $scalars")
+    length(arrays) > 0     && println("    arrays  : $arrays")
+    length(commons) > 0    && println("    COMMONs : $commons")
+    return nothing
+end
+
 function processiostatements(code::AbstractString, formatstrings)
 
     #replace 'PRINT*,...' => 'PRINT(*)...'
@@ -752,7 +762,7 @@ function processiostatements(code::AbstractString, formatstrings)
             end
         end
         str = uppercase(m.captures[1]) * '(' * params * ',' * m.captures[4] * ')' * m.captures[5] * '\n'
-        @show str
+        #@show str
         code = replace(code, m.match => str)
     end
 
@@ -765,7 +775,6 @@ function processiostatements(code::AbstractString, formatstrings)
             for (k,v) in formats
                 occursin(r"FORMAT\d+_\d+", k) && (str *= ' '^length(m.captures[1]) * "$k = $v\n")
             end
-            @show str
             o = m.offset
             code = code[1:prevind(code,o)] * str * code[thisind(code,o):end]
             break
@@ -777,7 +786,7 @@ end
 
 function restoreformatstrings(code::AbstractString, formatstrings)
 
-    # into julias code
+    # inside julias code
     rx = r"^([^\n#]*)(FMT\d{7})"mi
     for m in reverse(collect(eachmatch(rx, code)))
         name = m.captures[2]
@@ -921,7 +930,7 @@ function markbyblock(lines, blockbegin)
         elseif (m = match(rxend, l)) !== nothing
             if length(blocks) == 0
                 @debug lines[blockbegin:i]
-                @warn "Find only \"END\" without start of the program or subroutine"
+                #@warn "Find only \"END\" without start of the program or subroutine"
                 append!(blocks, ["PROGRAM", mask("NAMELESSPROGRAM"), blockbegin, 0, String[],
                                  ntuple(_->nothing, Int(firstincluded-parent))...])
             end
@@ -1215,9 +1224,9 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
     #verbosity > 2 && @debug for (i,z) in enumerate(ts) print("$i: "); show(z); println() end
 
     startvarsind = findfirst(t->t.kind==Tokens.DECLARATION, ts) + 1 # "::"
-    decltype0 = restore(@view ts[1:startvarsind-2])
-    i = findfirst(t->t.val=="DIMENSION", @view ts[1:startvarsind-2])
-    dim0 = i!==nothing && ts[i+1].kind == LPAREN ? restore(@view ts[i+1:findmatchedbrace(ts,i)-1]) : ""
+    decltype0 = restore(@view(ts[1:startvarsind-2]))
+    i = findfirst(t->t.val=="DIMENSION", @view(ts[1:startvarsind-2]))
+    dim0 = i!==nothing && ts[i+1].kind == Tokens.LPAREN ? restore(@view(ts[i+1:findmatchedbrace(ts,i+1)-1])) : ""
     # catch braces and its contents https://regex101.com/r/inyyeW/2
     #rxdim = r"DIMENSION(\(((?>[^()]++|(?1))*)\))"i
     #dim0 = (m = match(rxdim, decltype)) !== nothing ? m.captures[2] : ""
@@ -1236,7 +1245,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
             if t.kind == Tokens.LPAREN #'(' # arrays
                 # TODO?: catch character(len=10)
                 i, i0 = findmatchedbrace(ts, i), i
-                dim = restore(@view ts[i0+1:i-1])
+                dim = restore(@view(ts[i0+1:i-1]))
                 t = ts[i+=1]
             elseif dim0 != ""
                 dim = dim0
@@ -1247,7 +1256,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
                 i += 1; i0 = i
                 # catch ',' or EOL
                 i = something(findnexttoken(Tokens.COMMA, ts, i), length(ts)+1)
-                val = restore(@view ts[i0:i-1])
+                val = restore(@view(ts[i0:i-1]))
             else
                 val = ""
             end
@@ -1255,7 +1264,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
                 # Type-bound procedure declaration
                 # https://stackoverflow.com/questions/31885866/what-does-equals-greater-than-mean-in-fortran
                 if occursin(r"\bGENERIC\b|\bPROCEDURE\b"i, decltype0)
-                    val = restore(@view ts[i+1:end])
+                    val = restore(@view(ts[i+1:end]))
                     decltype = decltype0 * ",ASSOCIATION"
                     i = length(ts)
                 else
@@ -1457,125 +1466,6 @@ function restorestrings(code, strings)
     return foldl(replace, reverse(collect(strings)), init=code)
 end
 
-#function parsereadwrite(str, pos)
-#    pos0 = pos
-#    label = fmt = IU = formatvar = ""
-#    params = Dict{String,String}()
-#    cmdtaken = false
-#    inparams = false
-#    nextparam = 1
-#    startsparam = Int[]
-#    endsparam = Int[]
-#    startargs = 0
-#    endargs = -1
-#    inbraces  = 0
-#
-#    ts = tokenize(str)
-#    seek(ts, pos)
-#    #startpos!(ts, pos)
-#    t = next_token(ts)
-#    while true
-#        t.kind = t.kind
-#        #print("_$t.kind")
-#        if t.kind == Tokens.ENDMARKER || t.kind == Tokens.WHITESPACE && occursin("\n", t.val)
-#            break
-#        elseif t.kind == Tokens.WHITESPACE
-#            # skip
-#        elseif !cmdtaken && t.kind == Tokens.IDENTIFIER # 'l'
-#            lex = uppercase(t.val) #lex, pos = taketoken(str, pos)
-#            if lex == "READ" || lex == "WRITE" || lex == "PRINT"
-#                cmdtaken = true
-#                next_token_nonspaces(ts)
-#                @assert t.kind == Tokens.LPAREN
-#                t = findmatchedbrace(ts, t)
-#            else
-#                # it is not an 'READ/WRITE' statement
-#                return 0, "", "", "", "", "", "", ""
-#            end
-#        elseif cmdtaken && inparams && t.kind == Tokens.IDENTIFIER # 'l'
-#            lex = t.val #lex, pos = taketoken(str, pos)
-#            LEX = uppercase(lex)
-#            t = next_token_nonspaces(st)
-#            if LEX == "FMT" && t.kind == Tokens.EQ # '='
-#                t = next_token_nonspaces(st)
-#                if t.kind == Tokens.INTEGER # that's LABEL
-#                    label = uppercase(t.val)
-#                elseif t.kind == Tokens.IDENTIFIER # formatstring in VAR
-#                    var = uppercase(t.val)
-#                elseif t.kind == Tokens.CHAR
-#                    fmt = t.val
-#                else
-#                    @error "Unexpected kind \"$(t.kind)\" of token \"$(dump(t))\"" *
-#                           " in \"$(str[pos:min(end,t.endpos[2]+10)])\""
-#                end
-#            elseif (LEX == "ERR" || LEX == "END" || LEX == "REC") &&
-#                   peektoken(str, skipspaces(str, pos)) == '='
-#                val, pos = taketokenexpr(str, skipspaces(str, skiptoken(str, skipspaces(str, pos))))
-#                #val, pos = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pos))))
-#                params[uppercase(lex)] = val
-#            elseif nextparam == 1
-#                IU = lex
-#            else
-#                # this is the format string in the variable
-#                formatvar = lex
-#                #occursin(r"^FMT\d{7}$", lex) ||
-#                #@warn("parsereadwrite(): $(@__LINE__): unknown FORMAT-parameter = \"$lex\"" *
-#                #      " in FORTRAN line:\n\"$(strip(str[thislinerange(str, pos)]))\"\n")
-#            end
-#        elseif cmdtaken && inparams && t.kind == 'd' && nextparam == 1
-#            IU, pos = taketoken(str, pos)
-#        elseif cmdtaken && inparams && t.kind == 'd'
-#            label, pos = taketoken(str, pos)
-#        elseif cmdtaken && inparams && t.kind == '*' && nextparam == 1
-#            IU, pos = taketoken(str, pos)
-#        elseif cmdtaken && inparams && t.kind == ''' || t.kind == '*'
-#            fmt, pos = taketoken(str, pos)
-#            fmt = concatcontinuedlines(fmt)
-#            fmt = replace(fmt, mask("''") => "'")
-#        elseif t.kind == '('
-#            inbraces += 1
-#            pos = skiptoken(str, pos)
-#            if length(startsparam) == 0
-#                push!(startsparam, pos)
-#                inparams = true
-#            end
-#        elseif t.kind == ')'
-#            inbraces -= 1
-#            if inbraces == 0 && inparams
-#                pos = position(ts)
-#                push!(endsparam, prevind(str, pos))
-#                startargs = nextind(str, pos)
-#                inparams = false
-#                endargs = pos = skipupto('\n', str, pos)
-#                endargs = prevind(str, endargs)
-#                break
-#            end
-#            pos = skiptoken(str, pos)
-#        elseif t.kind == ',' && inparams && inbraces == 1
-#            push!(endsparam, prevind(str, pos))
-#            pos = skiptoken(str, pos)
-#            push!(startsparam, thisind(str, pos))
-#            nextparam += 1
-#        else
-#            pos = skiptoken(str, pos)
-#        end
-#    end
-#
-#    IU = strip(str[startsparam[1]:endsparam[1]])
-#
-#    label == "" && (label = formatvar)
-#
-#    if fmt == "*"
-#        fmt = ""
-#    else
-#        fmt = replace(fmt, r"^\((.*)\)$"=>s"\1") # it is unenclose "()"
-#    end
-#    fmt = foldl((a,b) -> a*','*b, map(strip, split(fmt, ",")))
-#
-#    return ncodeunits(str[pos0:prevind(str,pos)]), IU, label, fmt, params,
-#           str[startsparam[1]:endsparam[end]], str[startargs:endargs]
-#end
-
 
 function splitformat(str)
     pos = 1
@@ -1623,63 +1513,6 @@ function splitformat(str)
     return fmt
 end
 
-function convertformat(formatstring)
-    FMT = OrderedDict(
-        r"^\/$"                => "\\n",             # / -> START NEW RECORD
-        r"^(\d*)P$"i           => "",                # Scale Factor (P): scale from/to mantissa
-        r"^A$"i                => s"%s",             # A -> %s
-        r"^A(\d*)$"i           => s"%\1s",           # A9 -> %9s
-        r"^I(\d*)$"i           => s"%\1i",           # I5 -> %5i
-        r"^I(\d+)\.(\d+)$"i    => s"%0\1i",          # I5.5 -> %05i there can be mistake if \2>\1
-        r"^[ED](\d*\.\d*)$"i   => s"%\1E",           # E7.2 -> %7.2E
-        r"^[ED]S(\d*\.\d*)$"i  => s"%\1E",           # ES7.2 -> %7.2E ???
-        r"^P[ED](\d*\.\d*)$"i  => s"%\1E",           # E7.2 -> %7.2E Scientific format with Scale Factor P
-        r"^P1[ED](\d*\.\d*)$"i => s"%\1E",           # E7.2 -> %7.2E
-        r"^P2[ED](\d*\.\d*)$"i => s"%\1E%\1E",       # E7.2 -> %7.2E ??? is it right?
-        r"^P3[ED](\d*\.\d*)$"i => s"%\1E%\1E%\1E",   # E7.2 -> %7.2E
-        r"^F(\d*\.\d*)$"i      => s"%\1F",           # F7.2 -> %7.2F
-        r"^X$"i                => s" ",              # X -> ' '
-        r"^T\d*$"i             => s" ",              # Tx -> ' ' : move to absolute position (column) x
-        r"^([-]?\d+)P$"i       => s"",               # 1P -> '' https://docs.oracle.com/cd/E19957-01/805-4939/z4000743a6e2/index.html
-        r"^([^']*)'(.*)'([^']*)$" => s"\1\2\3",      # unenclose ''
-    )
-    # split on tokens and apply repeats
-    format = parseformat(formatstring)
-    # converting
-    for rs in FMT
-        format = map( a->replace(a, rs), format)
-    end
-    return foldl(*, format)
-end
-
-"""
-$(SIGNATURES)
-Split format string on tokens and apply repeats
-"""
-function parseformat(formatstring)
-    #@show formatstring
-    rep = r"^(\d+)(.*)$"
-    formatparts = splitformat(formatstring)
-    #@show formatparts
-
-    format = Vector{String}(undef, 0)
-    for (i,el) in enumerate(formatparts)
-        if occursin(rep, el)
-            num = parse(Int, replace(el, rep=>s"\1"))
-            str = replace(el, rep => s"\2")
-            if occursin(r"\(.*\)", str)
-                str = replace(str,  r"\((.*)\)"=> s"\1")
-                fmt = parseformat(str)
-                [append!(format, fmt) for j=1:num]
-            else
-                [push!(format, str) for j=1:num]
-            end
-        else
-            push!(format, el)
-        end
-    end
-    return format
-end
 
 function insertabsentreturn(code::AbstractString)
     # find last return if exist. https://regex101.com/r/evx2Lu/13
@@ -1827,6 +1660,7 @@ end
 evaltype!(v::Var)  = v.type = evaltype(v)
 
 function evalsize(v::Var)
+    # TODO: Array
     size = ""
     if evaltype(v) <: AbstractStringsTypes
         if (m = occursin(r"(?:^|,)CHARACTER\*(\d+)(?:,|$)", v.decl)) !== nothing
@@ -2072,6 +1906,7 @@ $(SIGNATURES)
 Replace conditional GOTOs with GOTOs in branch of julia's `if else` statements
 """
 function processconditionalgotos(code)
+
     # GOTO (10,20,30,40) SOMEEXPR
     # https://regex101.com/r/nKZmku/3
     rx = r"(\h*\d+:?\h*|\h*)go\h*?to\h*\(\h*\d+\h*,.*"i
@@ -2363,11 +2198,10 @@ end
 
 function splatprintviews(code::AbstractString)
     rx = r"view(\(((?>[^()]++|(?1))*)\))"
-    rxprint = Regex("\\bprintln\\b|\\b$(mask('@'))printf\\b")
+    rxprint = Regex("\\bPRINT\\b|\\bWRITE\\b|\\bREAD\\b|\\bprintln\\b|\\b$(mask('@'))printf\\b")
     for m in reverse(collect(eachmatch(rx, code)))
         line = code[continuedlinesrange(code, m.offset)]
         if occursin(rxprint, line)
-        #if occursin(r"\bprintln\b|\bat_iZjAcpPokMprintf\b", line)
             o = m.offset
             l = ncodeunits(m.match)
             code = code[1:prevind(code,o)] * m.match * "..." * code[thisind(code,o+l):end]
@@ -2645,7 +2479,7 @@ sameasarg(::AbstractVector, code::AbstractString)  = splitonlines(code)
 sameasarg(::AbstractString, lines::AbstractVector) = tostring(lines)
 
 
-const repairreplacements = OrderedDict(
+const repairreplacements = [
     # Goto
     r"^(\s*)GO\s*TO\s+(\d+)"mi => s"\1goto \2"  ,
     r"(\h)GO\s*TO\s+(\d+)"mi   => s"\1goto \2"  ,
@@ -2698,8 +2532,8 @@ const repairreplacements = OrderedDict(
     r"\h*\.lt\.\h*"i       => s" < "    ,
     # remove whitespace between function name and left brace https://regex101.com/r/CxV232/3
     r"(\b(?!elseif|if|while|data|parameter|selectcase|case)[\w_]+\b)[\h]+\("mi => s"\1(",
-)
-const FPreplacements = OrderedDict(
+]
+const FPreplacements = [
     # fix floating point numbers with exponent
     # spaces in numbers into underscores "1 000 E3" => "1_000E3"
     r"(?<![\*\w])(\b\d+)[ ]+(\d+\b)"m                      => s"\1⊙\2",  # '⊙' will be restored later
@@ -2720,8 +2554,8 @@ const FPreplacements = OrderedDict(
     r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([+-]?[0-9]+))"m => s"\1E\2",
     # "a%b" => "a.b"
     r"(\b\w+)\h*%\h*(\w+\b)"m => s"\1.\2",
-)
-const FP64replacements = OrderedDict(
+]
+const FP64replacements = [
     # fix floating point numbers with exponent
     # spaces in numbers into underscores "1 000 E3" => "1_000E3"
     r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1⊙\2",  # '⊙' will be restored later
@@ -2741,10 +2575,10 @@ const FP64replacements = OrderedDict(
     r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[D]([+-]?[0-9]+))"m => s"\1E\2",
     # "a%b" => "a.b"
     r"(\b\w+)\h*%\h*(\w+\b)"m => s"\1.\2",
-)
+]
 
 
-const subscriptreplacements = OrderedDict(
+const subscriptreplacements = [
     r"\b(\w+)_0([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₀\2",
     r"\b(\w+)_1([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₁\2",
     r"\b(\w+)_2([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1₂\2",
@@ -2772,16 +2606,16 @@ const subscriptreplacements = OrderedDict(
     r"\b(\w+)_u([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ᵤ\2",
     r"\b(\w+)_v([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ᵥ\2",
     r"\b(\w+)_x([₀₁₂₃₄₅₆₇₈₉ᵢᵣᵤᵥᵦᵧᵨᵩᵪₐₑₒₓₕₖₗₘₙₚₛₜⱼ]*)\b"  => s"\1ₓ\2",
-)
-const greeksubscriptreplacements = OrderedDict(
+]
+const greeksubscriptreplacements = [
     r"\b(\w+)_schwa\b" => s"\1ₔ",
     r"\b(\w+)_beta\b"  => s"\1ᵦ",
     r"\b(\w+)_gamma\b" => s"\1ᵧ",
     r"\b(\w+)_rho\b"   => s"\1ᵨ",
     r"\b(\w+)_phi\b"   => s"\1ᵩ",
     r"\b(\w+)_chi\b"   => s"\1ᵪ",
-)
-const greeksreplacements = OrderedDict(
+]
+const greeksreplacements = [
     # Not all greek letters are distinguished from the latin letters thus skipped.
     # Skipped letters have case insensitive lowercase counterparts.
 
@@ -2847,9 +2681,9 @@ const greeksreplacements = OrderedDict(
     r"\bexists([_\d]*)\b"i     => s"∃\1" ,
     r"\bnexists([_\d]*)\b"i    => s"∄\1" ,
     r"\bnabla([_\d]*)\b"i      => s"∇\1" ,
-)
+]
 
-const trivialreplacements = OrderedDict(
+const trivialreplacements = [
     #r"(\bif\b|\belseif\b|\bend\b|\bdo\b|\bwhile\b)"i => s"\L\1",
     r"(\bIF\b)"i     => s"if"     ,
     r"(\bELSEIF\b)"i => s"elseif" ,
@@ -2932,11 +2766,11 @@ const trivialreplacements = OrderedDict(
     # Custom functions
     #r"(\b[\w_]+\b)\(1:J_LEN\(\1\)\)"i => s"rstrip(\1)",
     #r"(?:\bJ_LEN\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip\1)",
-)
+]
 
 
 # Main syntax replacements. Order matters here.
-const replacements = OrderedDict(
+const replacements = [
     # ponter => pointed, and all pointers(references) should be [],
     # Note: not worked on scalars
     r"=>(\h*)(\w+)" => "=\1Ref(\2)",
@@ -2998,10 +2832,10 @@ const replacements = OrderedDict(
     r"^(\h*|)PROGRAM\h*$"mi => s"\1PROGRAM NAMELESSPROGRAM",
     # rstrip()
     r"\h*$" => s"",
-)
+]
 
 
-const headersprocessing = OrderedDict(
+const headersprocessing = [
     # Reorganise functions and doc strings. This may be very project specific.
     # https://regex101.com/r/DAIHhl/1
     r"^(\h+)subroutine(\h+)(\w+)(\(([^)]*)\))(\h*#.*?|\h*)\n(#\h*\n)?#\h*function:\h*(.*?)#\h*\n"is =>
@@ -3022,7 +2856,7 @@ const headersprocessing = OrderedDict(
     r"^(\h*|)character(?:\*\d{1,2})?\h*function\h+"mi    => s"\1function ",
     r"^(\h*|)logical\h*function\h+"mi                    => s"\1function ",
     r"^(\h*|)function\h+"mi                              => s"\1function ",
-)
+]
 
 
 # Patterns to remove
@@ -3467,7 +3301,7 @@ function casedsavekeywords(code::AbstractString, casetransform=identity)
         "true", "try", "using", "while",
     ]
     exportednamesuppercase = [
-"ARGS", "BLAS", "C_NULL", "DEPOT_PATH", "ENDIAN_BOM", "ENV", "GC", "HTML", "I", "IO",
+"ARGS", "BLAS", "C_NULL", "DEPOT_PATH", "ENDIAN_BOM", "ENV", "GC", "HTML", #="I",=# "IO",
 "LAPACK", "LOAD_PATH", "LQ", "LU", "MIME", "PROGRAM_FILE", "QR", "SVD", "VERSION"
     ]
 
@@ -3623,7 +3457,7 @@ function casedsavekeywords(code::AbstractString, casetransform=identity)
         ts = collect(tokenize(code))
         for k in exportednameslowercase
             l = length(k)
-            for (i,t) in enumerate(ts)
+            for (i,t) in pairs(ts)
                 if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
                     ts[i] = @set t.val = uppercase(t.val)
                 end
@@ -3639,9 +3473,17 @@ function casedsavekeywords(code::AbstractString, casetransform=identity)
         ts = collect(tokenize(code))
         for k in Iterators.flatten((exportednameslowercase, exportednamesmixedcase))
             l = length(k)
-            for (i,t) in enumerate(ts)
+            for (i,t) in pairs(ts)
                 if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
                     ts[i] = @set t.val = uppercase(t.val)
+                end
+            end
+        end
+        for k in exportednamesuppercase
+            l = length(k)
+            for (i,t) in pairs(ts)
+                if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
+                    ts[i] = @set t.val = lowercase(t.val)
                 end
             end
         end
