@@ -1,11 +1,12 @@
 # Fortran to Julia transpiler
 
 Still not yet production ready translator. There's still a lot to come, but the most of job it can do.
-However, the script can convert BLAS and LAPACK.
+However, the script can convert BLAS and LAPACK. Distinguishes parenses between a function call and an array getindex. Conversion is carried out as close as possible to the original format, unless the formatting option is specified.
 
 Things that still need to be completed:
 * Formatted I/O. Now simple formats are implemented through `println` and `@printf`.
-Cyclic formats, formats in variables are not implemented. The FLOATS are output as C, not Fortran.
+Cyclic formats and formats in string variables are not implemented.
+The FLOATs are output as C, not Fortran.
 * Annotating arrays as function arguments, namely using `@view` and `OffsetArrays` where appropriate.
 
 # Usage
@@ -102,10 +103,12 @@ JULIA_DEBUG="FortranTranspiler" FortranTranspiler.jl -vv program.f90
 
 # Work In Progess
 
+Tests needed, lots of them.
+
 It is also necessary to work out the function arguments, or rather array arguments.
 This will require a double pass of source.
 
-For formatted I/O, you need the `FortranFormattedIO.jl` package, alike
+For formatted I/O requires the `FortranFormattedIO.jl` package, alike
 [FortranFiles.jl](https://github.com/traktofon/FortranFiles.jl). There is no such package yet,
 it needs to be developed. For this possibility there is a branch `v2`.
 
@@ -114,4 +117,4 @@ And Fortran90 needs a lot of work.
 
 # Acknowledgment
 
-Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
+Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56 of Rafael Schouten.
