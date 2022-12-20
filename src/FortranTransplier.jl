@@ -12,7 +12,7 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
   and should be fixed via set loop counter before `for` to afterlast value. May be fixed!
 * due to julia's GC, some implicit variables initialized inside the loop/ blocks
   may disappear upon they exit these blocks. Consider initilizing them with
-  the appropriate value in the initial part of the function code.
+  the appropriate value in the outer part of the function code.
 * julia can't propagate back changed values of scalars via functions args, unlike fortran.
   Thus such changed scalars should be returned via functions `return` statement.
 * all strings in fortran are `Vector{UInt8}` and should stay same type to preserve
@@ -25,6 +25,7 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 * in the `DATA` statement can occur uncatched repetitions like `DATA SOMEARRAY/8*0,1,2/`
 * 'FORMAT' conversion is unaccomplished
 * implied do-loops are not always caught
+* pointers (`Ref`) do not work on primitive types
 * there is no OPENMP in Julia
 * OOP in Julia is not suitable for Fortran OOP, https://github.com/ipod825/OOPMacro.jl
   is not mature.
@@ -32,21 +33,37 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 # TODO
     ~~custom precision like `dzero=0.0_psb_dpk_, done=1.0_psb_dpk_` in psb_const_mod.F90~~
         and `INTEGER,PARAMETER :: RP = SELECTEDREALKIND(15)`
+
     few PROGRAMs in one file
+
     use SOMEMODULE -> use .SOMEMODULE
+
     use SOMEMODULE, only: SOMEFUN -> import .SOMEMODULE: SOMEFUN
+
     RECURSIVE
+
     `FUNCTION f(x) RESULT(v)` can use as `f` as `v` as the returned value?
+
     parse DO...
+
     parse IF... ???
-    parse all `picktoken`
+
+    parse all `peektoken`
+
     eval CHARACTER* size in COMMON => create `evalsize`
+
     insert running BLOCK DATA at startup in main()
+
     we are need **CallTree** and then reassign COMMON with different vars names
+
     try to `eval` expressions in COMMON blocks vars dimensions. This can be done on second pass.
+
     Or create **IncludeTree** to improve files processing order.
+
+    Proceed INCLUDE 'SOMEFILE.f'
     modifying INCLUDE 'SOMETHING' to change extension
-    BREAK outer_loop, where outer_loop is an label for DO loop
+
+    BREAK OUTER_LOOP, where OUTER_LOOP: is an label for DO loop
 
     Wrong converted:
     INTEGER, PARAMETER :: indx(27) = (/  &
@@ -78,6 +95,8 @@ using Printf
 using Setfield
 using Tokenize
 import Tokenize.Tokens.Token
+import Tokenize.Lexers.Lexer
+import Tokenize.Lexers: next_token, peekchar
 
 
 # module for CLI running
@@ -114,6 +133,7 @@ const usage =
         -v, --verbose      Be verbose.
         -vv, --verbose     Be more verbose.
         -vvv, --verbose    Be yet more verbose.
+        --preserveext      Preserve files extensions (suffix), append .jl: SOMEFILE.f90.jl
         --uppercase        Convert all identifiers to upper case.
         --lowercase        Convert all identifiers to lower case.
         --greeks           Replace the greek letter names thats starts the var names
@@ -149,12 +169,14 @@ function main(args = String[])
         code = open(fname) |> read |> String
         result = convert_fortran(code, casetransform=case, quiet=opts["--quiet"],
                                  verbosity=verbosity, double=opts["--double"], greeks=opts["--greeks"],
-                                 subscripts=opts["--subscripts"], greeksubscripts=opts["--greeksubscripts"])
-        opts["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
+                                 subscripts=opts["--subscripts"], greeksubscripts=opts["--greeksubscripts"],
+                                 preserveext=opts["--preserveext"])
+        foutname = opts["--preserveext"] ? fname * ".jl" : splitext(fname)[1] * ".jl"
+        opts["--dry-run"] || write(foutname, result)
         if opts["--formatting"]
             try
                 result = JuliaFormatter.format_text(result, margin = 192)
-                opts["--dry-run"] || write(splitext(fname)[1] * ".jl", result)
+                opts["--dry-run"] || write(foutname, result)
             catch
                 @info("$(splitext(fname)[1] * ".jl")\nFormatting is not successfull\n")
             end
@@ -177,6 +199,7 @@ function parseargs(args)
                                 opts["-vv"]  = false
                                 opts["-vvv"] = false
     opts["--dry-run"]         = opts["-n"]   = false
+    opts["--preserveext"]     = false
     opts["--uppercase"]       = false
     opts["--lowercase"]       = false
     opts["--double"]          = false
@@ -265,7 +288,8 @@ end # of module CLI
 
 function convert_fortran(code; casetransform=identity, quiet=true,
                          verbosity=0, double=false,
-                         greeks=false, subscripts=0, greeksubscripts=false)
+                         greeks=false, subscripts=0, greeksubscripts=false,
+                         preserveext=false)
 
     # ORDER OF PROCESSING IS FRAGILE
 
@@ -353,6 +377,7 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         #write("test2.jl", code)
 
         # READ and WRITE statements
+        #write("test1.jl", code)
         code = processiostatements(code, formatstrings)
         code = foldl(replace, reverse(collect(formatstrings)), init=code)
 
@@ -547,12 +572,12 @@ function savespecialsymbols(code::AbstractString)
         code = replace(code, m.match => str)
     end
 
-    # stitch Fortran90 "&\n  &" continued lines marks in strings
-    rx = r"('((?>[^']*|(?1))*)')"m
-    for m in reverse(collect(eachmatch(rx, code)))
-        str = replace(m.match, r"&\h*\n\h*&"m => "")
-        code = replace(code, m.match => str)
-    end
+    #### stitch Fortran90 "&\n  &" continued lines marks in strings
+    ###rx = r"('((?>[^']*|(?1))*)')"m
+    ###for m in reverse(collect(eachmatch(rx, code)))
+    ###    str = replace(m.match, r"&\h*\n\h*&"m => "")
+    ###    code = replace(code, m.match => str)
+    ###end
 
     # save '!', '"', '\\', '$' inside strings like 'SOME!"\\$STRING'
     rx = r"('((?>[^'\n]*|(?1))*)')"m
@@ -580,211 +605,6 @@ function restorespecialsymbols(code::AbstractString)
     code = replace(code, mask("end") => "end"  )
     code = replace(code, mask('\\')  => "\\\\" )
     return code
-end
-
-Base.length(t::Token) = t.endpos[2] - t.startpos[2] + 1
-
-function casedsavekeywords(code::AbstractString, casetransform=identity)
-    # replace "keyword" with "KEYWORD"
-    # Julia keywords https://docs.julialang.org/en/v1/base/base/#Keywords-1
-    keywords = [
-        "baremodule", "begin", "break", "catch", "const", "continue", "do", "else",
-        "elseif", "end", "export", "false", "finally", "for", "function", "global",
-        "if", "import", "let", "local", "macro", "module", "quote", "return", "struct",
-        "true", "try", "using", "while",
-    ]
-    exportednamesuppercase = [
-"ARGS", "BLAS", "C_NULL", "DEPOT_PATH", "ENDIAN_BOM", "ENV", "GC", "HTML", "I", "IO",
-"LAPACK", "LOAD_PATH", "LQ", "LU", "MIME", "PROGRAM_FILE", "QR", "SVD", "VERSION"
-    ]
-
-    exportednamesmixedcase = [
-"AbstractArray", "AbstractChannel", "AbstractChar", "AbstractDict", "AbstractDisplay",
-"AbstractFloat", "AbstractIrrational", "AbstractMatrix", "AbstractRange", "AbstractSet",
-"AbstractSparseArray", "AbstractSparseMatrix", "AbstractSparseVector", "AbstractString",
-"AbstractUnitRange", "AbstractVecOrMat", "AbstractVector", "Adjoint", "Any",
-"ArgumentError", "Array", "AssertionError", "Base", "Bidiagonal", "BigFloat", "BigInt",
-"BitArray", "BitMatrix", "BitSet", "BitVector", "Bool", "BoundsError", "Broadcast",
-"BunchKaufman", "CapturedException", "CartesianIndex", "CartesianIndices", "Cchar",
-"Cdouble", "Cfloat", "Channel", "Char", "Cholesky", "CholeskyPivoted", "Cint", "Cintmax_t",
-"Clong", "Clonglong", "Cmd", "Colon", "Complex", "ComplexF16", "ComplexF32", "ComplexF64",
-"CompositeException", "Condition", "Core", "Cptrdiff_t", "Cshort", "Csize_t", "Cssize_t",
-"Cstring", "Cuchar", "Cuint", "Cuintmax_t", "Culong", "Culonglong", "Cushort", "Cvoid",
-"Cwchar_t", "Cwstring", "DataType", "DenseArray", "DenseMatrix", "DenseVecOrMat",
-"DenseVector", "Diagonal", "Dict", "DimensionMismatch", "Dims", "DivideError", "Docs",
-"DomainError", "Eigen", "Enum", "EOFError", "ErrorException", "Exception",
-"ExponentialBackOff", "Expr", "Factorization", "Float16", "Float32", "Float64", "Function",
-"GeneralizedEigen", "GeneralizedSchur", "GeneralizedSVD", "GlobalRef", "Hermitian",
-"Hessenberg", "IdDict", "IndexCartesian", "IndexLinear", "IndexStyle", "InexactError",
-"Inf", "Inf16", "Inf32", "Inf64", "InitError", "InsertionSort", "Int", "Int128", "Int16",
-"Int32", "Int64", "Int8", "Integer", "InteractiveUtils", "InterruptException",
-"InvalidStateException", "IOBuffer", "IOContext", "IOStream", "Irrational", "Iterators",
-"KeyError", "LAPACKException", "LDLt", "Libc", "LinearAlgebra", "LinearIndices",
-"LineNumberNode", "LinRange", "LoadError", "LowerTriangular", "MathConstants", "Matrix",
-"MergeSort", "Meta", "Method", "MethodError", "Missing", "MissingException", "Module",
-"NamedTuple", "NaN", "NaN16", "NaN32", "NaN64", "Nothing", "NTuple", "Number",
-"OrdinalRange", "OutOfMemoryError", "OverflowError", "Pair", "PartialQuickSort",
-"PermutedDimsArray", "Pipe", "PipeBuffer", "PosDefException", "ProcessFailedException",
-"Ptr", "QRPivoted", "QuickSort", "QuoteNode", "RankDeficientException", "Rational", "RawFD",
-"ReadOnlyMemoryError", "Real", "ReentrantLock", "Ref", "Regex", "RegexMatch", "RoundDown",
-"RoundFromZero", "RoundingMode", "RoundNearest", "RoundNearestTiesAway",
-"RoundNearestTiesUp", "RoundToZero", "RoundUp", "Schur", "SegmentationFault", "Set",
-"Signed", "SingularException", "Some", "SparseArrays", "SparseMatrixCSC", "SparseVector",
-"StackOverflowError", "StackTraces", "StepRange", "StepRangeLen", "StridedArray",
-"StridedMatrix", "StridedVecOrMat", "StridedVector", "String", "StringIndexError",
-"SubArray", "SubstitutionString", "SubString", "Symbol", "Symmetric", "SymTridiagonal",
-"Sys", "SystemError", "Task", "TaskFailedException", "Text", "TextDisplay", "Threads",
-"Timer", "Transpose", "Tridiagonal", "Tuple", "Type", "TypeError", "TypeVar", "UInt",
-"UInt128", "UInt16", "UInt32", "UInt64", "UInt8", "UndefInitializer", "UndefKeywordError",
-"UndefRefError", "UndefVarError", "UniformScaling", "Union", "UnionAll",
-"UnitLowerTriangular", "UnitRange", "UnitUpperTriangular", "Unsigned", "UpperHessenberg",
-"UpperTriangular", "Val", "Vararg", "VecElement", "VecOrMat", "Vector", "VersionNumber",
-"WeakKeyDict", "WeakRef", "ZeroPivotException"
-    ]
-
-    exportednameslowercase = [
-"abs", "abs2", "abspath", "abstract", "accumulate", "acos", "acosd", "acosh", "acot",
-"acotd", "acoth", "acsc", "acscd", "acsch", "adjoint", "all", "allunique", "angle", "ans",
-"any", "applicable", "apropos", "argmax", "argmin", "ascii", "asec", "asecd", "asech",
-"asin", "asind", "asinh", "asyncmap", "atan", "atand", "atanh", "atexit", "atreplinit",
-"axes", "backtrace", "baremodule", "basename", "begin", "big", "bind", "binomial",
-"bitreverse", "bitrotate", "bitstring", "blockdiag", "break", "broadcast", "bswap",
-"bunchkaufman", "bytes2hex", "bytesavailable", "cat", "catch", "catch_backtrace", "cbrt",
-"ccall", "cd", "ceil", "cglobal", "checkbounds", "checkindex", "chmod", "cholesky", "chomp",
-"chop", "chown", "circshift", "cis", "clamp", "cld", "clipboard", "close", "cmp",
-"coalesce", "code_llvm", "code_lowered", "code_native", "codepoint", "code_typed",
-"codeunit", "codeunits", "code_warntype", "collect", "complex", "cond", "condskeel", "conj",
-"const", "contains", "continue", "convert", "copy", "copysign", "cos", "cosc", "cosd",
-"cosh", "cospi", "cot", "cotd", "coth", "count", "countlines", "count_ones", "count_zeros",
-"cp", "cross", "csc", "cscd", "csch", "ctime", "cumprod", "cumsum", "current_task",
-"deepcopy", "deg2rad", "denominator", "det", "detach", "devnull", "diag", "diagind",
-"diagm", "diff", "digits", "dirname", "disable_sigint", "display", "displayable",
-"displaysize", "div", "divrem", "do", "dot", "download", "dropdims", "dropzeros", "dump",
-"eachcol", "eachindex", "eachline", "eachmatch", "eachrow", "eachslice", "edit", "eigen",
-"eigmax", "eigmin", "eigvals", "eigvecs", "else", "elseif", "eltype", "empty", "end",
-"endswith", "enumerate", "eof", "eps", "error", "esc", "escape_string", "eval", "evalfile",
-"evalpoly", "exit", "exp", "exp10", "exp2", "expanduser", "expm1", "exponent", "export",
-"extrema", "factorial", "factorize", "false", "falses", "fd", "fdio", "fetch", "fieldcount",
-"fieldname", "fieldnames", "fieldoffset", "fieldtype", "fieldtypes", "filemode", "filesize",
-"fill", "filter", "finalize", "finalizer", "finally", "findall", "findfirst", "findlast",
-"findmax", "findmin", "findnext", "findnz", "findprev", "first", "firstindex", "fld",
-"fld1", "fldmod", "fldmod1", "flipsign", "float", "floatmax", "floatmin", "floor", "flush",
-"fma", "foldl", "foldr", "for", "foreach", "frexp", "fullname", "function", "functionloc",
-"gcd", "gcdx", "gensym", "get", "getfield", "gethostname", "getindex", "getkey", "getpid",
-"getproperty", "get_zero_subnormals", "givens", "global", "gperm", "hasfield", "hash",
-"haskey", "hasmethod", "hasproperty", "hcat", "hessenberg", "hex2bytes", "homedir", "htol",
-"hton", "hvcat", "hypot", "identity", "if", "ifelse", "ignorestatus", "im", "imag",
-"import", "in", "include", "include_dependency", "include_string", "indexin", "instances",
-"intersect", "inv", "invmod", "invoke", "invperm", "isa", "isabspath", "isabstracttype",
-"isapprox", "isascii", "isassigned", "isbits", "isbitstype", "isblockdev", "ischardev",
-"iscntrl", "isconcretetype", "isconst", "isdefined", "isdiag", "isdigit", "isdir",
-"isdirpath", "isdisjoint", "isdispatchtuple", "isempty", "isequal", "iseven", "isfifo",
-"isfile", "isfinite", "ishermitian", "isimmutable", "isinf", "isinteger", "isinteractive",
-"isless", "isletter", "islink", "islocked", "islowercase", "ismarked", "ismissing",
-"ismount", "ismutable", "isnan", "isnothing", "isnumeric", "isodd", "isone", "isopen",
-"ispath", "isperm", "isposdef", "ispow2", "isprimitivetype", "isprint", "ispunct", "isqrt",
-"isreadable", "isreadonly", "isready", "isreal", "issetequal", "issetgid", "issetuid",
-"issocket", "issorted", "isspace", "issparse", "issticky", "isstructtype", "issubnormal",
-"issubset", "issuccess", "issymmetric", "istaskdone", "istaskfailed", "istaskstarted",
-"istextmime", "istril", "istriu", "isuppercase", "isvalid", "iswritable", "isxdigit",
-"iszero", "iterate", "join", "joinpath", "keys", "keytype", "kill", "kron", "last",
-"lastindex", "lcm", "ldexp", "ldlt", "leading_ones", "leading_zeros", "length", "less",
-"let", "local", "lock", "log", "log10", "log1p", "log2", "logabsdet", "logdet", "lowercase",
-"lowercasefirst", "lowrankdowndate", "lowrankupdate", "lpad", "lq", "lstat", "lstrip",
-"ltoh", "lu", "lyap", "macro", "macroexpand", "map", "mapfoldl", "mapfoldr", "mapreduce",
-"mapslices", "mark", "match", "max", "maximum", "maxintfloat", "merge", "mergewith",
-"methods", "methodswith", "min", "minimum", "minmax", "missing", "mkdir", "mkpath",
-"mktemp", "mktempdir", "mod", "mod1", "mod2pi", "modf", "module", "mtime", "muladd",
-"mutable", "mv", "nameof", "names", "ncodeunits", "ndigits", "ndims", "nextfloat",
-"nextind", "nextpow", "nextprod", "nfields", "nnz", "nonmissingtype", "nonzeros", "norm",
-"normalize", "normpath", "nothing", "notify", "ntoh", "ntuple", "nullspace", "numerator",
-"nzrange", "objectid", "occursin", "oftype", "one", "ones", "oneunit", "only", "open",
-"operm", "opnorm", "ordschur", "pairs", "parent", "parentindices", "parentmodule", "parse",
-"partialsort", "partialsortperm", "pathof", "peakflops", "peek", "permute", "permutedims",
-"pi", "pinv", "pipeline", "pkgdir", "pointer", "pointer_from_objref", "popdisplay",
-"position", "powermod", "precision", "precompile", "__precompile__", "prevfloat", "prevind",
-"prevpow", "primitive", "print", "println", "printstyled", "process_exited",
-"process_running", "prod", "promote", "promote_rule", "promote_shape", "promote_type",
-"propertynames", "pushdisplay", "pwd", "qr", "quote", "rad2deg", "rand", "randn", "range",
-"rank", "rationalize", "read", "readavailable", "readchomp", "readdir", "readline",
-"readlines", "readlink", "readuntil", "real", "realpath", "redirect_stderr",
-"redirect_stdin", "redirect_stdout", "redisplay", "reduce", "reenable_sigint", "reim",
-"reinterpret", "relpath", "rem", "rem2pi", "repeat", "replace", "repr", "reset", "reshape",
-"rethrow", "retry", "return", "reverse", "reverseind", "rm", "rot180", "rotl90", "rotr90",
-"round", "rounding", "rowvals", "rpad", "rsplit", "rstrip", "run", "schedule", "schur",
-"searchsorted", "searchsortedfirst", "searchsortedlast", "sec", "secd", "sech", "seek",
-"seekend", "seekstart", "selectdim", "setdiff", "setenv", "setprecision", "setrounding",
-"set_zero_subnormals", "show", "showable", "showerror", "sign", "signbit", "signed",
-"significand", "similar", "sin", "sinc", "sincos", "sincosd", "sind", "sinh", "sinpi",
-"size", "sizeof", "skip", "skipchars", "skipmissing", "sleep", "something", "sort",
-"sortperm", "sortslices", "sparse", "sparsevec", "spdiagm", "split", "splitdir",
-"splitdrive", "splitext", "splitpath", "sprand", "sprandn", "sprint", "spzeros", "sqrt",
-"stacktrace", "startswith", "stat", "stderr", "stdin", "stdout", "step", "stride",
-"strides", "string", "strip", "struct", "struct", "subtypes", "success", "sum", "summary",
-"supertype", "supertypes", "svd", "svdvals", "sylvester", "symdiff", "symlink",
-"systemerror", "tan", "tand", "tanh", "task_local_storage", "tempdir", "tempname",
-"textwidth", "thisind", "throw", "time", "timedwait", "time_ns", "titlecase", "to_indices",
-"touch", "tr", "trailing_ones", "trailing_zeros", "transcode", "transpose", "tril", "triu",
-"true", "trues", "trunc", "truncate", "try", "trylock", "tryparse", "tuple", "type", "type",
-"typeassert", "typeintersect", "typejoin", "typemax", "typemin", "typeof", "undef",
-"unescape_string", "union", "unique", "unlock", "unmark", "unsafe_load",
-"unsafe_pointer_to_objref", "unsafe_read", "unsafe_string", "unsafe_trunc", "unsafe_wrap",
-"unsafe_write", "unsigned", "uperm", "uppercase", "uppercasefirst", "using", "valtype",
-"values", "varinfo", "vcat", "vec", "versioninfo", "view", "wait", "walkdir", "which",
-"while", "widemul", "widen", "withenv", "write", "xor", "yield", "yieldto", "zero", "zeros",
-"zip"
-    ]
-
-    if casetransform == uppercase
-        code = uppercase(code)
-        for k in exportednamesuppercase
-            code  = replace(code, Regex("\b"*k*"\b") => lowercase(k))
-        end
-        identifiers = collectidentifiers(collect(tokenize(code)))
-
-    elseif casetransform == lowercase
-        code = lowercase(code)
-        for k in keywords
-            code  = replace(code, Regex("\b"*k*"\b") => uppercase(k))
-        end
-        ts = collect(tokenize(code))
-        for k in exportednameslowercase
-            l = length(k)
-            for (i,t) in enumerate(ts)
-                if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
-                    ts[i] = @set t.val = uppercase(t.val)
-                end
-            end
-        end
-        identifiers = collectidentifiers(ts)
-        code = join(untokenize.(ts))
-
-    else
-        for k in keywords
-            code  = replace(code, Regex("\b"*k*"\b", "i") => uppercase(k))
-        end
-        ts = collect(tokenize(code))
-        for k in Iterators.flatten((exportednameslowercase, exportednamesmixedcase))
-            l = length(k)
-            for (i,t) in enumerate(ts)
-                if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
-                    ts[i] = @set t.val = uppercase(t.val)
-                end
-            end
-        end
-        identifiers = collectidentifiers(ts)
-        code = join(untokenize.(ts))
-    end
-
-    # suppress marks of strings like "STR98403iZjAcpPokM"
-    identifiers = filter(a->!occursin(Regex("STR\\d{7}"*mask()), a), identifiers)
-    identifiers = filter(a->!occursin(Regex("FMT\\d{7}"), a), identifiers)
-
-    vars = Dict{String, String}()
-    for i in identifiers
-        vars[uppercase(i)] = i
-    end
-    return code, vars
 end
 
 function savecomments(code, commentstrings)
@@ -1625,7 +1445,7 @@ function parsereadwrite(str, pos)
     inbraces  = 0
 
     while true
-        ttype = picktoken(str, pos)
+        ttype = peektoken(str, pos)
         #print("_$ttype")
         if ttype == 'e' || ttype == '\n'
             break
@@ -1643,10 +1463,10 @@ function parsereadwrite(str, pos)
         elseif cmdtaken && inparams && ttype == 'l'
             lex, pos = taketoken(str, pos)
             LEX = uppercase(lex)
-            if LEX == "FMT" && picktoken(str, skipspaces(str, pos)) == '='
+            if LEX == "FMT" && peektoken(str, skipspaces(str, pos)) == '='
                 label, pos = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pos))))
             elseif (LEX == "ERR" || LEX == "END" || LEX == "REC") &&
-                   picktoken(str, skipspaces(str, pos)) == '='
+                   peektoken(str, skipspaces(str, pos)) == '='
                 val, pos = taketokenexpr(str, skipspaces(str, skiptoken(str, skipspaces(str, pos))))
                 #val, pos = taketoken(str, skipspaces(str, skiptoken(str, skipspaces(str, pos))))
                 params[uppercase(lex)] = val
@@ -1719,7 +1539,7 @@ function splitformat(str)
     inbraces  = 0
 
     while true
-        ttype = picktoken(str, pos)
+        ttype = peektoken(str, pos)
         #print("_$ttype")
         if ttype == 'e' || ttype == '\n'
             break
@@ -2068,7 +1888,7 @@ function parsedostatement(line)
     starts   = [0,0,0]
 
     while true
-        ttype = picktoken(line, pos)
+        ttype = peektoken(line, pos)
         #print("_$ttype")
         if ttype == 'e' || ttype == '#'
             break
@@ -2099,7 +1919,7 @@ function parsedostatement(line)
                 return false,"","","","","","",""
             end
             pos = skipspaces(line, pos)
-            if picktoken(line, pos) != '='
+            if peektoken(line, pos) != '='
                 # it is not the 'DO' statement
                 return false,"","","","","","",""
             end
@@ -2284,7 +2104,7 @@ function processifstatements(code)
             else
                 str *= ifexec * "\n" * " "^length(s1) * "end "
             end
-        elseif wothen == false && picktoken(ifcond, skipwhitespaces(ifcond, 1)) in ('#','\n',' ')
+        elseif wothen == false && peektoken(ifcond, skipwhitespaces(ifcond, 1)) in ('#','\n',' ')
             str = s1 * s2 * "$(mask("if")) (" * ifcond * ")" * afterthencomment
         elseif wothen == false
             str = s1 * s2 * "$(mask("if")) " * strip(ifcond) * afterthencomment
@@ -2308,7 +2128,7 @@ function parseifstatement(str, pos)
     inbraces  = 0
 
     while true
-        ttype = picktoken(str, pos)
+        ttype = peektoken(str, pos)
         #print("_$ttype")
         if ttype == 'e' || ttype == '\n'
             break
@@ -2331,7 +2151,7 @@ function parseifstatement(str, pos)
             lex, pos = taketoken(str, pos)
             if lowercase(lex) == "then"
                 wothen = false
-                if picktoken(str, skipwhitespaces(str, pos)) == '#'
+                if peektoken(str, skipwhitespaces(str, pos)) == '#'
                     pos, pold = skipcomment(str, skipwhitespaces(str,pos)), pos
                     afterthencomment = str[pold:prevind(str, pos)]
                 else
@@ -2560,7 +2380,7 @@ function processparameters(code::AbstractString)
         statementtaken = false
         inbraces = 0; p = 1
         while true
-            ttype = picktoken(line, p)
+            ttype = peektoken(line, p)
             if ttype == 'e'
                 str *= '\n'
                 break
@@ -2600,11 +2420,11 @@ function processparameters(code::AbstractString)
         statementtaken = false
         inbraces = 0; p = 1
         while true
-            ttype = picktoken(line, p)
+            ttype = peektoken(line, p)
             if ttype == 'e'
                 str *= '\n'
                 break
-            elseif !statementtaken && ttype == ':' && picknexttoken(line, p) == ':'
+            elseif !statementtaken && ttype == ':' && peeknexttoken(line, p) == ':'
                 p = nextind(line, nextind(line, p))
                 str *= "      "
                 statementtaken = true
@@ -2642,7 +2462,7 @@ function processdatastatement(code::AbstractString, arrays)
         str = lex = ""
         p = 1; statementtaken = itscal = itvector = afterlist = false
         while true
-            ttype = picktoken(line, p)
+            ttype = peektoken(line, p)
             if ttype == 'e'
                 str *= '\n'
                 break
@@ -2695,6 +2515,12 @@ function processlinescontinuation(code::AbstractString)
     rx = r"(\h*)(#=CMMNT\d{10}=#|)\t\r\t(\h*|)(\/\/|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)"
     code = replace(code, rx => SS("\\4\\1\\2\t\r\t\\3"))
     return code
+end
+
+function splitcontinuedlines(code)
+    return code isa AbstractVector ?
+           map(a->replace(a, r"\t\t"m=>"\t\r\t"), code) :
+           replace(code, r"\t\t"m=>"\t\r\t")
 end
 
 function concatcontinuedlines(code)
@@ -3042,7 +2868,7 @@ const trivialreplacements = OrderedDict(
     r"\bASSOCIATED\b\h*\(\h*(\w+)\h*,\h*(\w+)\h*\)"i                 =>
         s"@isdefined(\1) && \1 === \2 #= ASSOCIATED(\1, \2) =#",
     r"\bASSOCIATED\b\h*\(\h*(\w+)\h*\)"i                             =>
-        s"@isdefined(\1) && !===(\1, nothing) #= ASSOCIATED(\1) =#",
+        s"@isdefined(\1) && !==(\1, nothing) #= ASSOCIATED(\1) =#",
     r"\bNULLIFY\b\h*\(\h*(\w+)\h*,\h*(\w+)\h*,\h*(\w+)\h*\)"i        =>
         s"\1 = nothing; \2 = nothing; \3 = nothing #= NULLIFY(...) =#",
     r"\bNULLIFY\b\h*\(\h*(\w+)\h*,\h*(\w+)\h*\)"i                    =>
@@ -3071,8 +2897,9 @@ const trivialreplacements = OrderedDict(
 
 # Main syntax replacements. Order matters here.
 const replacements = OrderedDict(
-    # ponter => pointed
-    r"=>" => "=",
+    # ponter => pointed, and all pointers(references) should be [],
+    # Note: not worked on scalars
+    r"=>(\h*)(\w+)" => "=\1Ref(\2)",
     # constant arrays
     r"\(/" => s"[",
     r"/\)" => s"]",
@@ -3171,6 +2998,18 @@ const removal = [
 
 # Some routines for Tokenize.jl
 
+function Base.length(t::Token)
+    if t.endpos[1] == t.startpos[1]
+        if t.endpos[2] - t.startpos[2] + 1 == 0
+            return length(untokenize(t))
+        else
+            return t.endpos[2] - t.startpos[2] + 1
+        end
+    else
+        return length(untokenize(t))
+    end
+end
+
 restore(x) = join(untokenize.(x))
 
 function matchedbrace(k::Tokens.Kind)
@@ -3254,6 +3093,45 @@ function findmatchedbrace(ts::AbstractArray{<:Token}, i)
     return nothing
 end
 
+# Lexer: Streamed Tokens
+
+next_token_nonspaces(st::Lexer) = (t = next_token(st)).kind != Tokens.WHITESPACE ? t : next_token(st)
+
+function findmatchedbrace(st::Lexer, t::Token = next_token(st))
+    if t.kind == Tokens.LPAREN || t.kind == Tokens.LSQUARE || t.kind == Tokens.LBRACE
+        left = t.kind; right = matchedbrace(t)
+    else
+        left = matchedbrace(t); right = t.kind
+    end
+    inbraces = 1
+    if t.kind == left # '('
+        while t.kind != Tokens.ENDMARKER
+            t = next_token(st)
+            if t.kind == left
+                inbraces += 1
+            elseif inbraces == 1 && t.kind == right
+                return t
+            elseif t.kind == right
+                inbraces -= 1
+            end
+        end
+    else#=if t.kind == right # ')'
+        for i = i-1:-1:1
+            if t.kind == right
+                inbraces += 1
+            elseif inbraces == 1 && t.kind == left
+                return i
+            elseif t.kind == left
+                inbraces -= 1
+            end
+        end
+    else=#
+        @error "I can't move back in Lexer stream"
+        exit(1)
+    end
+    return nothing
+end
+
 
 """
 $(SIGNATURES)
@@ -3281,7 +3159,7 @@ end
 # Some parsing routines
 
 
-function picktoken(str, i)
+function peektoken(str, i)
     # may be there should be used `Base.Unicode.category_abbrev()` or `Base.Unicode.category_code()`
     len = ncodeunits(str)
     i = thisind(str, i)
@@ -3309,7 +3187,7 @@ function catchtokenvar(str, i)
     start = i
     while true
         i = nextind(str, i)
-        if eos() || !(picktoken(str, i) in ('l', 'd', '_'))
+        if eos() || !(peektoken(str, i) in ('l', 'd', '_'))
             return start, prevind(str,i)
         end
     end
@@ -3321,9 +3199,9 @@ function catchtokenstring(str, i)
     while true
         i = nextind(str, i)
         eos() && return start, prevind(str, i)
-        if picktoken(str, i) == ''' && picktoken(str, nextind(str, i)) == ''' # double ' -- escaped
+        if peektoken(str, i) == ''' && peektoken(str, nextind(str, i)) == ''' # double ' -- escaped
             i = nextind(str, i)
-        elseif picktoken(str, i) == '''
+        elseif peektoken(str, i) == '''
             return start, prevind(str, i)
         end
     end
@@ -3337,11 +3215,11 @@ function catchbrackets(str, i)
     while true
         i = nextind(str, i)
         eos() && return start, prevind(str, i)
-        if picktoken(str, i) == '['
+        if peektoken(str, i) == '['
             inbraces += 1
-        elseif inbraces == 1 && picktoken(str, i) == ']'
+        elseif inbraces == 1 && peektoken(str, i) == ']'
             return start, prevind(str, i)
-        elseif picktoken(str, i) == ']'
+        elseif peektoken(str, i) == ']'
             inbraces -= 1
         end
     end
@@ -3354,11 +3232,11 @@ function catchbraces(str, i)
     while true
         i = nextind(str, i)
         eos() && return start, prevind(str, i)
-        if picktoken(str, i) == '('
+        if peektoken(str, i) == '('
             inbraces += 1
-        elseif inbraces == 1 && picktoken(str, i) == ')'
+        elseif inbraces == 1 && peektoken(str, i) == ')'
             return start, prevind(str, i)
-        elseif picktoken(str, i) == ')'
+        elseif peektoken(str, i) == ')'
             inbraces -= 1
         end
     end
@@ -3366,10 +3244,10 @@ end
 function catchtoken(str, i)
     eos() = i>len; len = ncodeunits(str); i = thisind(str, i)
     start = i
-    ttype = picktoken(str, i)
+    ttype = peektoken(str, i)
     while true
         i = nextind(str, i)
-        if eos() || picktoken(str, i) != ttype
+        if eos() || peektoken(str, i) != ttype
             return start, prevind(str,i)
         end
     end
@@ -3397,7 +3275,7 @@ end
 function marktoken(str, i)
     len = ncodeunits(str); i = thisind(str, i)
     i > len && return len, prevind(str, len), len+1
-    ttype = picktoken(str, i)
+    ttype = peektoken(str, i)
     if ttype == 'l'      # catch keywords and identifiers
         startpos, endpos = catchtokenvar(str, i)
         return startpos, endpos, nextind(str, endpos)
@@ -3430,7 +3308,7 @@ function taketokenexpr(str, i)
     eos() = i>len; len = ncodeunits(str); i1 = i = thisind(str, i)
     eos() && return str[len:len-1], len+1
     while true
-        picktoken(str, skipspaces(str,i)) in (',', ')') && break
+        peektoken(str, skipspaces(str,i)) in (',', ')') && break
         i = skiptoken(str, skipspaces(str,i))
         eos() && break
     end
@@ -3438,9 +3316,9 @@ function taketokenexpr(str, i)
 end
 
 taketoken(str, i)     =  ( (p1,p2,p3) -> (str[p1:p2], p3) )(marktoken(str, i)...)
-picknexttoken(str, i) =  picktoken(str, marktoken(str, i)[3])
+peeknexttoken(str, i) =  peektoken(str, marktoken(str, i)[3])
 skiptoken(str, i)     =  marktoken(str, i)[3]
-skiptoken(c::AbstractChar, str, i) = picktoken(str,i) == c ? skiptoken(str,i) : i
+skiptoken(c::AbstractChar, str, i) = peektoken(str,i) == c ? skiptoken(str,i) : i
 skipspaces(str, i)    = catchspaces(str, i)[2] + 1
 skipcomment(str, i)   = catchcomment(str, i)[2] + 1
 skipbraces(str, i)    = nextind(str, nextind(str, catchbraces(str, i)[2]))
@@ -3537,6 +3415,209 @@ function printlines(lines)
     println()
     #for l in lines println(l) end
     for (i,l) in enumerate(lines) print("[$i]: \"$l\"\n") end
+end
+
+function casedsavekeywords(code::AbstractString, casetransform=identity)
+    # replace "keyword" with "KEYWORD"
+    # Julia keywords https://docs.julialang.org/en/v1/base/base/#Keywords-1
+    keywords = [
+        "baremodule", "begin", "break", "catch", "const", "continue", "do", "else",
+        "elseif", "end", "export", "false", "finally", "for", "function", "global",
+        "if", "import", "let", "local", "macro", "module", "quote", "return", "struct",
+        "true", "try", "using", "while",
+    ]
+    exportednamesuppercase = [
+"ARGS", "BLAS", "C_NULL", "DEPOT_PATH", "ENDIAN_BOM", "ENV", "GC", "HTML", "I", "IO",
+"LAPACK", "LOAD_PATH", "LQ", "LU", "MIME", "PROGRAM_FILE", "QR", "SVD", "VERSION"
+    ]
+
+    exportednamesmixedcase = [
+"AbstractArray", "AbstractChannel", "AbstractChar", "AbstractDict", "AbstractDisplay",
+"AbstractFloat", "AbstractIrrational", "AbstractMatrix", "AbstractRange", "AbstractSet",
+"AbstractSparseArray", "AbstractSparseMatrix", "AbstractSparseVector", "AbstractString",
+"AbstractUnitRange", "AbstractVecOrMat", "AbstractVector", "Adjoint", "Any",
+"ArgumentError", "Array", "AssertionError", "Base", "Bidiagonal", "BigFloat", "BigInt",
+"BitArray", "BitMatrix", "BitSet", "BitVector", "Bool", "BoundsError", "Broadcast",
+"BunchKaufman", "CapturedException", "CartesianIndex", "CartesianIndices", "Cchar",
+"Cdouble", "Cfloat", "Channel", "Char", "Cholesky", "CholeskyPivoted", "Cint", "Cintmax_t",
+"Clong", "Clonglong", "Cmd", "Colon", "Complex", "ComplexF16", "ComplexF32", "ComplexF64",
+"CompositeException", "Condition", "Core", "Cptrdiff_t", "Cshort", "Csize_t", "Cssize_t",
+"Cstring", "Cuchar", "Cuint", "Cuintmax_t", "Culong", "Culonglong", "Cushort", "Cvoid",
+"Cwchar_t", "Cwstring", "DataType", "DenseArray", "DenseMatrix", "DenseVecOrMat",
+"DenseVector", "Diagonal", "Dict", "DimensionMismatch", "Dims", "DivideError", "Docs",
+"DomainError", "Eigen", "Enum", "EOFError", "ErrorException", "Exception",
+"ExponentialBackOff", "Expr", "Factorization", "Float16", "Float32", "Float64", "Function",
+"GeneralizedEigen", "GeneralizedSchur", "GeneralizedSVD", "GlobalRef", "Hermitian",
+"Hessenberg", "IdDict", "IndexCartesian", "IndexLinear", "IndexStyle", "InexactError",
+"Inf", "Inf16", "Inf32", "Inf64", "InitError", "InsertionSort", "Int", "Int128", "Int16",
+"Int32", "Int64", "Int8", "Integer", "InteractiveUtils", "InterruptException",
+"InvalidStateException", "IOBuffer", "IOContext", "IOStream", "Irrational", "Iterators",
+"KeyError", "LAPACKException", "LDLt", "Libc", "LinearAlgebra", "LinearIndices",
+"LineNumberNode", "LinRange", "LoadError", "LowerTriangular", "MathConstants", "Matrix",
+"MergeSort", "Meta", "Method", "MethodError", "Missing", "MissingException", "Module",
+"NamedTuple", "NaN", "NaN16", "NaN32", "NaN64", "Nothing", "NTuple", "Number",
+"OrdinalRange", "OutOfMemoryError", "OverflowError", "Pair", "PartialQuickSort",
+"PermutedDimsArray", "Pipe", "PipeBuffer", "PosDefException", "ProcessFailedException",
+"Ptr", "QRPivoted", "QuickSort", "QuoteNode", "RankDeficientException", "Rational", "RawFD",
+"ReadOnlyMemoryError", "Real", "ReentrantLock", "Ref", "Regex", "RegexMatch", "RoundDown",
+"RoundFromZero", "RoundingMode", "RoundNearest", "RoundNearestTiesAway",
+"RoundNearestTiesUp", "RoundToZero", "RoundUp", "Schur", "SegmentationFault", "Set",
+"Signed", "SingularException", "Some", "SparseArrays", "SparseMatrixCSC", "SparseVector",
+"StackOverflowError", "StackTraces", "StepRange", "StepRangeLen", "StridedArray",
+"StridedMatrix", "StridedVecOrMat", "StridedVector", "String", "StringIndexError",
+"SubArray", "SubstitutionString", "SubString", "Symbol", "Symmetric", "SymTridiagonal",
+"Sys", "SystemError", "Task", "TaskFailedException", "Text", "TextDisplay", "Threads",
+"Timer", "Transpose", "Tridiagonal", "Tuple", "Type", "TypeError", "TypeVar", "UInt",
+"UInt128", "UInt16", "UInt32", "UInt64", "UInt8", "UndefInitializer", "UndefKeywordError",
+"UndefRefError", "UndefVarError", "UniformScaling", "Union", "UnionAll",
+"UnitLowerTriangular", "UnitRange", "UnitUpperTriangular", "Unsigned", "UpperHessenberg",
+"UpperTriangular", "Val", "Vararg", "VecElement", "VecOrMat", "Vector", "VersionNumber",
+"WeakKeyDict", "WeakRef", "ZeroPivotException"
+    ]
+
+    exportednameslowercase = [
+"abs", "abs2", "abspath", "abstract", "accumulate", "acos", "acosd", "acosh", "acot",
+"acotd", "acoth", "acsc", "acscd", "acsch", "adjoint", "all", "allunique", "angle", "ans",
+"any", "applicable", "apropos", "argmax", "argmin", "ascii", "asec", "asecd", "asech",
+"asin", "asind", "asinh", "asyncmap", "atan", "atand", "atanh", "atexit", "atreplinit",
+"axes", "backtrace", "baremodule", "basename", "begin", "big", "bind", "binomial",
+"bitreverse", "bitrotate", "bitstring", "blockdiag", "break", "broadcast", "bswap",
+"bunchkaufman", "bytes2hex", "bytesavailable", "cat", "catch", "catch_backtrace", "cbrt",
+"ccall", "cd", "ceil", "cglobal", "checkbounds", "checkindex", "chmod", "cholesky", "chomp",
+"chop", "chown", "circshift", "cis", "clamp", "cld", "clipboard", "close", "cmp",
+"coalesce", "code_llvm", "code_lowered", "code_native", "codepoint", "code_typed",
+"codeunit", "codeunits", "code_warntype", "collect", "complex", "cond", "condskeel", "conj",
+"const", "contains", "continue", "convert", "copy", "copysign", "cos", "cosc", "cosd",
+"cosh", "cospi", "cot", "cotd", "coth", "count", "countlines", "count_ones", "count_zeros",
+"cp", "cross", "csc", "cscd", "csch", "ctime", "cumprod", "cumsum", "current_task",
+"deepcopy", "deg2rad", "denominator", "det", "detach", "devnull", "diag", "diagind",
+"diagm", "diff", "digits", "dirname", "disable_sigint", "display", "displayable",
+"displaysize", "div", "divrem", "do", "dot", "download", "dropdims", "dropzeros", "dump",
+"eachcol", "eachindex", "eachline", "eachmatch", "eachrow", "eachslice", "edit", "eigen",
+"eigmax", "eigmin", "eigvals", "eigvecs", "else", "elseif", "eltype", "empty", "end",
+"endswith", "enumerate", "eof", "eps", "error", "esc", "escape_string", "eval", "evalfile",
+"evalpoly", "exit", "exp", "exp10", "exp2", "expanduser", "expm1", "exponent", "export",
+"extrema", "factorial", "factorize", "false", "falses", "fd", "fdio", "fetch", "fieldcount",
+"fieldname", "fieldnames", "fieldoffset", "fieldtype", "fieldtypes", "filemode", "filesize",
+"fill", "filter", "finalize", "finalizer", "finally", "findall", "findfirst", "findlast",
+"findmax", "findmin", "findnext", "findnz", "findprev", "first", "firstindex", "fld",
+"fld1", "fldmod", "fldmod1", "flipsign", "float", "floatmax", "floatmin", "floor", "flush",
+"fma", "foldl", "foldr", "for", "foreach", "frexp", "fullname", "function", "functionloc",
+"gcd", "gcdx", "gensym", "get", "getfield", "gethostname", "getindex", "getkey", "getpid",
+"getproperty", "get_zero_subnormals", "givens", "global", "gperm", "hasfield", "hash",
+"haskey", "hasmethod", "hasproperty", "hcat", "hessenberg", "hex2bytes", "homedir", "htol",
+"hton", "hvcat", "hypot", "identity", "if", "ifelse", "ignorestatus", "im", "imag",
+"import", "in", "include", "include_dependency", "include_string", "indexin", "instances",
+"intersect", "inv", "invmod", "invoke", "invperm", "isa", "isabspath", "isabstracttype",
+"isapprox", "isascii", "isassigned", "isbits", "isbitstype", "isblockdev", "ischardev",
+"iscntrl", "isconcretetype", "isconst", "isdefined", "isdiag", "isdigit", "isdir",
+"isdirpath", "isdisjoint", "isdispatchtuple", "isempty", "isequal", "iseven", "isfifo",
+"isfile", "isfinite", "ishermitian", "isimmutable", "isinf", "isinteger", "isinteractive",
+"isless", "isletter", "islink", "islocked", "islowercase", "ismarked", "ismissing",
+"ismount", "ismutable", "isnan", "isnothing", "isnumeric", "isodd", "isone", "isopen",
+"ispath", "isperm", "isposdef", "ispow2", "isprimitivetype", "isprint", "ispunct", "isqrt",
+"isreadable", "isreadonly", "isready", "isreal", "issetequal", "issetgid", "issetuid",
+"issocket", "issorted", "isspace", "issparse", "issticky", "isstructtype", "issubnormal",
+"issubset", "issuccess", "issymmetric", "istaskdone", "istaskfailed", "istaskstarted",
+"istextmime", "istril", "istriu", "isuppercase", "isvalid", "iswritable", "isxdigit",
+"iszero", "iterate", "join", "joinpath", "keys", "keytype", "kill", "kron", "last",
+"lastindex", "lcm", "ldexp", "ldlt", "leading_ones", "leading_zeros", "length", "less",
+"let", "local", "lock", "log", "log10", "log1p", "log2", "logabsdet", "logdet", "lowercase",
+"lowercasefirst", "lowrankdowndate", "lowrankupdate", "lpad", "lq", "lstat", "lstrip",
+"ltoh", "lu", "lyap", "macro", "macroexpand", "map", "mapfoldl", "mapfoldr", "mapreduce",
+"mapslices", "mark", "match", "max", "maximum", "maxintfloat", "merge", "mergewith",
+"methods", "methodswith", "min", "minimum", "minmax", "missing", "mkdir", "mkpath",
+"mktemp", "mktempdir", "mod", "mod1", "mod2pi", "modf", "module", "mtime", "muladd",
+"mutable", "mv", "nameof", "names", "ncodeunits", "ndigits", "ndims", "nextfloat",
+"nextind", "nextpow", "nextprod", "nfields", "nnz", "nonmissingtype", "nonzeros", "norm",
+"normalize", "normpath", "nothing", "notify", "ntoh", "ntuple", "nullspace", "numerator",
+"nzrange", "objectid", "occursin", "oftype", "one", "ones", "oneunit", "only", "open",
+"operm", "opnorm", "ordschur", "pairs", "parent", "parentindices", "parentmodule", "parse",
+"partialsort", "partialsortperm", "pathof", "peakflops", "peek", "permute", "permutedims",
+"pi", "pinv", "pipeline", "pkgdir", "pointer", "pointer_from_objref", "popdisplay",
+"position", "powermod", "precision", "precompile", "__precompile__", "prevfloat", "prevind",
+"prevpow", "primitive", "print", "println", "printstyled", "process_exited",
+"process_running", "prod", "promote", "promote_rule", "promote_shape", "promote_type",
+"propertynames", "pushdisplay", "pwd", "qr", "quote", "rad2deg", "rand", "randn", "range",
+"rank", "rationalize", "read", "readavailable", "readchomp", "readdir", "readline",
+"readlines", "readlink", "readuntil", "real", "realpath", "redirect_stderr",
+"redirect_stdin", "redirect_stdout", "redisplay", "reduce", "reenable_sigint", "reim",
+"reinterpret", "relpath", "rem", "rem2pi", "repeat", "replace", "repr", "reset", "reshape",
+"rethrow", "retry", "return", "reverse", "reverseind", "rm", "rot180", "rotl90", "rotr90",
+"round", "rounding", "rowvals", "rpad", "rsplit", "rstrip", "run", "schedule", "schur",
+"searchsorted", "searchsortedfirst", "searchsortedlast", "sec", "secd", "sech", "seek",
+"seekend", "seekstart", "selectdim", "setdiff", "setenv", "setprecision", "setrounding",
+"set_zero_subnormals", "show", "showable", "showerror", "sign", "signbit", "signed",
+"significand", "similar", "sin", "sinc", "sincos", "sincosd", "sind", "sinh", "sinpi",
+"size", "sizeof", "skip", "skipchars", "skipmissing", "sleep", "something", "sort",
+"sortperm", "sortslices", "sparse", "sparsevec", "spdiagm", "split", "splitdir",
+"splitdrive", "splitext", "splitpath", "sprand", "sprandn", "sprint", "spzeros", "sqrt",
+"stacktrace", "startswith", "stat", "stderr", "stdin", "stdout", "step", "stride",
+"strides", "string", "strip", "struct", "struct", "subtypes", "success", "sum", "summary",
+"supertype", "supertypes", "svd", "svdvals", "sylvester", "symdiff", "symlink",
+"systemerror", "tan", "tand", "tanh", "task_local_storage", "tempdir", "tempname",
+"textwidth", "thisind", "throw", "time", "timedwait", "time_ns", "titlecase", "to_indices",
+"touch", "tr", "trailing_ones", "trailing_zeros", "transcode", "transpose", "tril", "triu",
+"true", "trues", "trunc", "truncate", "try", "trylock", "tryparse", "tuple", "type", "type",
+"typeassert", "typeintersect", "typejoin", "typemax", "typemin", "typeof", "undef",
+"unescape_string", "union", "unique", "unlock", "unmark", "unsafe_load",
+"unsafe_pointer_to_objref", "unsafe_read", "unsafe_string", "unsafe_trunc", "unsafe_wrap",
+"unsafe_write", "unsigned", "uperm", "uppercase", "uppercasefirst", "using", "valtype",
+"values", "varinfo", "vcat", "vec", "versioninfo", "view", "wait", "walkdir", "which",
+"while", "widemul", "widen", "withenv", "write", "xor", "yield", "yieldto", "zero", "zeros",
+"zip"
+    ]
+
+    if casetransform == uppercase
+        code = uppercase(code)
+        for k in exportednamesuppercase
+            code  = replace(code, Regex("\b"*k*"\b") => lowercase(k))
+        end
+        identifiers = collectidentifiers(collect(tokenize(code)))
+
+    elseif casetransform == lowercase
+        code = lowercase(code)
+        for k in keywords
+            code  = replace(code, Regex("\b"*k*"\b") => uppercase(k))
+        end
+        ts = collect(tokenize(code))
+        for k in exportednameslowercase
+            l = length(k)
+            for (i,t) in enumerate(ts)
+                if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
+                    ts[i] = @set t.val = uppercase(t.val)
+                end
+            end
+        end
+        identifiers = collectidentifiers(ts)
+        code = join(untokenize.(ts))
+
+    else
+        for k in keywords
+            code  = replace(code, Regex("\b"*k*"\b", "i") => uppercase(k))
+        end
+        ts = collect(tokenize(code))
+        for k in Iterators.flatten((exportednameslowercase, exportednamesmixedcase))
+            l = length(k)
+            for (i,t) in enumerate(ts)
+                if t.kind == Tokens.IDENTIFIER && length(t) == l && t.val == k
+                    ts[i] = @set t.val = uppercase(t.val)
+                end
+            end
+        end
+        identifiers = collectidentifiers(ts)
+        code = join(untokenize.(ts))
+    end
+
+    # suppress marks of strings like "STR98403iZjAcpPokM"
+    identifiers = filter(a->!occursin(Regex("STR\\d{7}"*mask()), a), identifiers)
+    identifiers = filter(a->!occursin(Regex("FMT\\d{7}"), a), identifiers)
+
+    vars = Dict{String, String}()
+    for i in identifiers
+        vars[uppercase(i)] = i
+    end
+    return code, vars
 end
 
 
