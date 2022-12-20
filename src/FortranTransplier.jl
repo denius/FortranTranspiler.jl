@@ -1295,9 +1295,9 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
     #verbosity > 2 && @debug for (i,z) in enumerate(ts) print("$i: "); show(z); println() end
 
     startvarsind = findfirst(t->t.kind==Tokens.DECLARATION, ts) + 1 # "::"
-    decltype0 = restore(@view ts[1:startvarsind-2])
-    i = findfirst(t->t.val=="DIMENSION", @view ts[1:startvarsind-2])
-    dim0 = i!==nothing && ts[i+1].kind == LPAREN ? restore(@view ts[i+1:findmatchedbrace(ts,i)-1]) : ""
+    decltype0 = restore(@view(ts[1:startvarsind-2]))
+    i = findfirst(t->t.val=="DIMENSION", @view(ts[1:startvarsind-2]))
+    dim0 = i!==nothing && ts[i+1].kind == Tokens.LPAREN ? restore(@view(ts[i+1:findmatchedbrace(ts,i+1)-1])) : ""
     # catch braces and its contents https://regex101.com/r/inyyeW/2
     #rxdim = r"DIMENSION(\(((?>[^()]++|(?1))*)\))"i
     #dim0 = (m = match(rxdim, decltype)) !== nothing ? m.captures[2] : ""
@@ -1316,7 +1316,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
             if t.kind == Tokens.LPAREN #'(' # arrays
                 # TODO?: catch character(len=10)
                 i, i0 = findmatchedbrace(ts, i), i
-                dim = restore(@view ts[i0+1:i-1])
+                dim = restore(@view(ts[i0+1:i-1]))
                 t = ts[i+=1]
             elseif dim0 != ""
                 dim = dim0
@@ -1327,7 +1327,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
                 i += 1; i0 = i
                 # catch ',' or EOL
                 i = something(findnexttoken(Tokens.COMMA, ts, i), length(ts)+1)
-                val = restore(@view ts[i0:i-1])
+                val = restore(@view(ts[i0:i-1]))
             else
                 val = ""
             end
@@ -1335,7 +1335,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
                 # Type-bound procedure declaration
                 # https://stackoverflow.com/questions/31885866/what-does-equals-greater-than-mean-in-fortran
                 if occursin(r"\bGENERIC\b|\bPROCEDURE\b"i, decltype0)
-                    val = restore(@view ts[i+1:end])
+                    val = restore(@view(ts[i+1:end]))
                     decltype = decltype0 * ",ASSOCIATION"
                     i = length(ts)
                 else
