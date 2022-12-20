@@ -292,7 +292,9 @@ function convert_fortran(code; casetransform=identity, quiet=true,
     #write("test2.jl", code)
 
     commentstrings = OrderedDict{String,String}()
+    #write("test1.jl", code)
     code, commentstrings = savecomments(code, commentstrings)
+    #write("test2.jl", code)
 
     # convert lines continuations marks to "\t\r\t"
     code = replacecontinuationmarks(code, isfixedformfortran)
@@ -363,7 +365,9 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         code = processcommon(code, commons, arrays)
         #write("test-$(b[1])-$(b[2])-$(b[3])-$(b[4]).jl", code)
 
+        #write("test1.jl", code)
         code, commentstrings = commentoutdeclarations(code, commentstrings)
+        #write("test2.jl", code)
 
         code = processdostatements(code)
 
@@ -415,7 +419,9 @@ function convert_fortran(code; casetransform=identity, quiet=true,
         # https://github.com/JuliaLang/julia/issues/14853
         code = stripwhitesinbrackets(code)
 
+        #write("test1.jl", tostring(lines))
         code = restorecomments(code, commentstrings)
+        #write("test2.jl", tostring(lines))
 
         # removing unnecessaries
         for rx in removal
@@ -864,6 +870,7 @@ function collectformatstrings(code::AbstractString)
     rx = r"('\(((?>(?!'\(|\)')*[^\n]|(?1))*?)\)')"mi
     #rx = r"('\(((?>[\s\S](?!'\(|\)')*|(?1))*?)\)')"mi
     for m in reverse(collect(eachmatch(rx, code)))
+        #str = "\"$(String(m.captures[1]))\""
         str = String(m.match)
         #str = replace(m.match, mask("''") => "''")
         key = @sprintf "FMT%07d" mod(hash(str), 2^23)
@@ -973,13 +980,6 @@ function splitbyblocks(code, verbosity=0)
         k = findblock(flatted, b[parent])
         b[parent] = k !== nothing ? k : nothing
     end
-
-    #if verbosity > 2
-    #    for b in flatted
-    #        print("[$(b[startline]):$(b[lastline])] $(b[blocktype]): $(b[blockname])\n")
-    #        printlines(b[content])
-    #    end
-    #end
 
     return flatted
 end
@@ -1519,40 +1519,6 @@ function stripwhitesinbrackets(code::AbstractString)
     return code
 end
 
-function convertstrings(code::AbstractString)
-    # `S = 'A'`       => `S[1] = 'A'; S[2:end] .= 0`
-    # `S[1:2] = 'A'`  => `S[1] = 'A'; S[2] = ' '`
-    # `S = "ABC"`     => `S .= collect("ABC")[1:min(length(S),length("ABC"))]`
-    # ###`S[2] = "ABC"`  => `S[2] = collect("ABC")[1]`
-    # `S[:2] = "ABC"` => `S[1:2] .= collect("ABC")[1:2]`
-    # `S = "ABC"`     => `S .= collect("ABC")`
-    # `S = 'A'`       => `S .= 'A'`
-    # `S = 'A'`       => `S .= 'A'`
-    #
-
-    # convert `A = "ABC"` into `A .= collect("ABC")`
-    # capture string https://regex101.com/r/KTFUCj/3
-    rx = r"(\w+\s*)=(\s*)(\"(?:[^\"\\]|\\.)*\")"
-    for m in reverse(collect(eachmatch(rx, code)))
-        o = m.offset
-        code = code[1:prevind(code,o)] *
-               replace(m.match, rx => SS("\1.=\2collect(\3)")) *
-               code[thisind(code,o+ncodeunits(m.match)):end]
-    end
-
-    # convert `A[2] = "ABC"` into `A[2] = collect("ABC")[1]`
-    # capture string https://regex101.com/r/KTFUCj/3
-    rx = r"(\w+\[\w+\]\s*)=(\s*)(\"(?:[^\"\\]|\\.)*\")"
-    for m in reverse(collect(eachmatch(rx, code)))
-        o = m.offset
-        code = code[1:prevind(code,o)] *
-               replace(m.match, rx => SS("\1=\2collect(\3)[1]")) *
-               code[thisind(code,o+ncodeunits(m.match)):end]
-    end
-
-    return code
-end
-
 """
 $(SIGNATURES)
 Save and replace all strings with its hash
@@ -1582,7 +1548,6 @@ function savestrings(code::AbstractString, strings = OrderedDict{String, String}
 
     # save empty strings ''
     key = mask(@sprintf "STR%07d" mod(hash("\"\""), 2^23))
-    #key = mask(@sprintf "STR%s" mod(hash("\"\""), 2^20))
     strings[key] = stringtype * "\"\""
     code = replace(code, mask("''") => key)
 
