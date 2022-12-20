@@ -1,6 +1,14 @@
-Still not yet production ready translator. There's still a lot to come, but the most of job it can do
-(but, especially sad lack of formatted IO and arrays as arguments).
+# Fortran to Julia transpiler
 
+Still not yet production ready translator. There's still a lot to come, but the most of job it can do.
+However, the script can convert BLAS and LAPACK.
+
+Things that still need to be completed:
+* Formatted I/O. Now simple formats are implemented through `println` and `@printf`.
+Cyclic formats, formats in variables are not implemented. The FLOATS are output as C, not Fortran.
+* Annotating arrays as function arguments, namely using `@view` and `OffsetArrays` where appropriate.
+
+# Usage
 
 To try use:
 ```sh
@@ -16,9 +24,15 @@ or even
 ```sh
 julia FortranTranspiler.jl .
 ```
-to proceed all Fortan files in current folder.
+to proceed all Fortran files in current folder.
 
-In Linux environment you can use it by `FortranTranspiler.jl *.f` if you drop `FortranTranspiler.jl` as executable script somewhere in PATH.
+In Linux environment you can use it by `FortranTranspiler.jl *.f` if you drop
+`FortranTranspiler.jl` as executable script somewhere in PATH.
+
+Some packages will be required to run the script:
+```julia
+julia> ] add Compat DataStructures DocStringExtensions Espresso JuliaFormatter Printf Setfield Tokenize
+```
 
 Usage options `FortranTranspiler.jl --help`:
 ```
@@ -55,14 +69,8 @@ Options:
     --formatting       Try to format with JuliaFormatter package.
     --dontfixcontinue  Do not try to insert ommited CONTINUE in the ancient fortran DO LABEL loops.
     --packarrays       Insert also Arrays in returned values.
-    --strings
-    --dropdeclarations
-    --indentcomments   Shift commentary strings from 1 column to more suitable place.
     --double           Evaluate 1.0E0 as Float64, despite in fortran 1.0E0 is Float32.
-    --omitimplicit     Omit implicit scalars initialization.
     -n, --dry-run      Make the processing but don't write output ".jl" files.
-
-Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 
 [^1]: [Source-to-source compiler](https://en.wikipedia.org/wiki/Source-to-source_compiler).
 ```
@@ -70,10 +78,11 @@ Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
 The options `--greeks`, `--subscripts` and `--greeksubscripts` are useful for
 some converting of Fortran ASCII letters variables into pretty Unicode variable names.
 
-The `-v` option (and so on) is used to show the internal working machinery and possible errors in sourced Fortran files.
+The `-v` option (and so on) is used to show the internal working machinery and possible errors
+in sourced Fortran files.
 
-After processing, each resulting file will be tried on the Julia translator,
-and if the `--quiet` option is not specified, you can see the result of this.
+After processing, each resulting file will be tried to parse with the Julia translator,
+and if the `--quiet` option is not specified, you can see the unsuccessfull result of this.
 
 There is especial option `--formatting`, it uses
 [JuliaFormatter.jl](https://github.com/domluna/JuliaFormatter.jl) to try to pretty format
@@ -92,6 +101,17 @@ JULIA_DEBUG="FortranTranspiler" FortranTranspiler.jl -vv program.f90
 ```
 
 # Work In Progess
-It is also necessary to work out the function arguments, or rather array arguments. This will require a double pass of source.
+
+It is also necessary to work out the function arguments, or rather array arguments.
+This will require a double pass of source.
+
+For formatted I/O, you need the `FortranFormattedIO.jl` package, alike
+[FortranFiles.jl](https://github.com/traktofon/FortranFiles.jl). There is no such package yet,
+it needs to be developed. For this possibility there is a branch `v2`.
+
 
 And Fortran90 needs a lot of work.
+
+# Acknowledgment
+
+Inspired by https://gist.github.com/rafaqz/fede683a3e853f36c9b367471fde2f56
