@@ -46,7 +46,12 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
     try to `eval` expressions in COMMON blocks vars dimensions. This can be done on second pass.
     Or create **IncludeTree** to improve files processing order.
     modifying INCLUDE 'SOMETHING' to change extension
+    BREAK outer_loop, where outer_loop is an label for DO loop
 
+    Wrong converted:
+    INTEGER, PARAMETER :: indx(27) = (/  &
+           1, 20, 25, 47, 78, 92, 99, 103, 103, 121, 121, 122, 132, 139, 149, &
+         153, 159, 159, 165, 177, 182, 185, 185, 187, 187, 187, 187 /)
 
 
     return intent(out):
@@ -78,7 +83,7 @@ import Tokenize.Tokens.Token
 # module for CLI running
 module CLI
 
-Base.Experimental.@optlevel 0
+#Base.Experimental.@optlevel 0
 
 using ..FortranTransplier
 using Compat
@@ -776,9 +781,10 @@ function casedsavekeywords(code::AbstractString, casetransform=identity)
     return code, vars
 end
 
-function savecomments(code, commentstrings, casetransform=identity)
+function savecomments(code, commentstrings)
 
-    rx = r"[ ]*#(?!=?CMMNT\d{10}=?#?).*(?:\t|)$" # spaces goes to comments
+    # https://regex101.com/r/3Jq9xl/1
+    rx = r"[ ]*(?<!#=CMMNT\d{10}=)#(?!=CMMNT\d{10}=#).*(?:\t|)$" # spaces goes to comments
     lines = splitonlines(code)
 
     for i in axes(lines,1)
@@ -787,20 +793,21 @@ function savecomments(code, commentstrings, casetransform=identity)
             key = @sprintf "CMMNT%05d%05d" i mod(hash(str), 2^16)
             commentstrings[key] = String(str)
             # case conversion while comments are detached
-            lines[i] = casetransform(replace(lines[i], m.match => s"")) * " #=$key=#"
+            lines[i] = replace(lines[i], m.match => s"") * " #=$key=#"
         else
             # cut out all whitespaces not masked by the comments
-            lines[i] = casetransform(replace(lines[i], r"[ ]*(\t|)$" => s"\1"))
+            lines[i] = replace(lines[i], r"[ ]*(\t|)$" => s"\1")
         end
     end
     return sameasarg(code, lines), commentstrings
 end
 function restorecomments(code, commentstrings)
-    for (k,v) in commentstrings
-        code = replace(code, Regex("[ ]?#?=?$k=?#?") => v)
+    rx = r"#=(CMMNT\d{10})=#"
+    for m in collect(eachmatch(rx, code))
+        code = replace(code, m.match => commentstrings[m.captures[1]])
     end
-    for (k,v) in commentstrings
-        code = replace(code, Regex("[ ]?#?=?$k=?#?") => v)
+    for m in collect(eachmatch(rx, code))
+        code = replace(code, m.match => commentstrings[m.captures[1]])
     end
     return code
 end
@@ -811,19 +818,19 @@ Convert lines continuations marks to "\t\r\t"
 """
 function replacecontinuationmarks(code::AbstractString, fortranfixedform)
 
-    code = replace(code, r"(?:&)([ ]*(?:#?=?CMMNT\d{10}=?#?|))(?:\n|\t\r\t)"m => SS("\\1\t\r\t"))
+    code = replace(code, r"(?:&)([ ]*(?:#=CMMNT\d{10}=#|))(?:\n|\t\r\t)"m => SS("\\1\t\r\t"))
     code = replace(code, r"(?:\t\r\t|\n)([ ]*)&"m => SS("\t\r\t\\1 "))
     fortranfixedform && (code = replace(code, r"[\n\r][ ]{5}\S"m => SS("\t\r\t      ")))
 
     # also include empty and commented lines inside the block of continued lines in:
     # free-form
-    rx = r"\t\r\t[ ]*(#?=?CMMNT\d{10}=?#?|)(\n[ ]*(#?=?CMMNT\d{10}=?#?|))*\n[ ]*(#?=?CMMNT\d{10}=?#?|)\t\r\t"m
+    rx = r"\t\r\t[ ]*(#=CMMNT\d{10}=#|)(\n[ ]*(#=CMMNT\d{10}=#|))*\n[ ]*(#=CMMNT\d{10}=#|)\t\r\t"m
     for m in reverse(collect(eachmatch(rx, code)))
         str = replace(m.match, r"\n" => SS("\t\r\t"))
         code = replace(code, m.match => str)
     end
     # fixed form
-    rx = r"\n[ ]*(#?=?CMMNT\d{10}=?#?|)\t\r\t"m
+    rx = r"\n[ ]*(#=CMMNT\d{10}=#|)\t\r\t"m
     while true
         matches = collect(eachmatch(rx, code))
         length(matches) > 0 || break
@@ -840,7 +847,7 @@ function collectformatstrings(code::AbstractString)
 
     # collect FORMAT(some,format,args)
     rx = r"^\h*\d+\h+format\h*\("mi
-    rxfmt = r"^(\h*(\d+)\h+format\h*)\(([^\n]*)\)(\h*#?=?CMMNT\d{10}=?#?|\h*)$"mi
+    rxfmt = r"^(\h*(\d+)\h+format\h*)\(([^\n]*)\)(\h*#=CMMNT\d{10}=#|\h*)$"mi
     for mx in reverse(collect(eachmatch(rx, code)))
         r = continuedlinesrange(code, mx.offset)
         str = stripcommentsbutlast(rstrip(concatcontinuedlines(code[r])))
@@ -892,7 +899,7 @@ function masklabels(code::AbstractString)
     # mask F77 labels: "1000" => "L1000:" to be like in fortran90
     # https://regex101.com/r/FG2iyI/4
     rx = r"(?=\n[ ]{0,4}\d[ ]{0,4})([\d ]{0,5})"m
-    for m in reverse(collect(eachmatch(rx, code)))
+    for m in collect(eachmatch(rx, code))
         str = replace(m.match, r"(\d+)"m => s"L\1:")
         code = replace(code, m.match => str)
     end
@@ -905,7 +912,17 @@ unmasklabels(code::AbstractString) = replace(code, r"(\n\h*)L(\d+):(\h+)"m => s"
 $(SIGNATURES)
 Simple names for Blocks structure fields indices
 """
-@enum Blocks blocktype=1 blockname=2 startline=3 lastline=4 content=5 parent=6 localvars=7 localcommons=8 firstincluded=9
+@enum Blocks begin
+    blocktype     = 1
+    blockname     = 2
+    startline     = 3
+    lastline      = 4
+    content       = 5
+    parent        = 6
+    localvars     = 7
+    localcommons  = 8
+    firstincluded = 9
+end
 Base.to_index(a::Blocks) = Int(a)
 Base.promote_rule(T::Type, ::Type{Blocks}) = T
 Base.convert(T::Type, a::Blocks) = T(Int(a))
@@ -929,8 +946,8 @@ function splitbyblocks(code, verbosity=0)
     lines .= rstrip.(stripcomments.(lines))
 
     # Initial blocks tree:
-    # [blocktype, blockname, blockbegin, blockend, TEXT, parent, vars, commons,
-    #     [blocktype, blockname, blockbegin, blockend, TEXT, parent, vars, commons, [...], [...], ], [...], ]
+    # [blocktype, blockname, startline, lastline, content, parent, vars, commons,
+    #     [blocktype, blockname, startline, lastline, content, parent, vars, commons, [...], [...], ], [...], ]
     sourcetree = ["FILE", "", 1, length(lines), String[], ntuple(_->nothing, Int(firstincluded-parent))...]
     i = 1
     while (b = markbyblock(lines, i)) !== nothing
@@ -1175,6 +1192,7 @@ function collectvars(lines::AbstractVector, vars, verbosity=0)
     return scalars, arrays, strings, commons, vars
 end
 
+addtostringlist(s::AbstractString, add::AbstractString) = join(unique(sort(push!(split(s, ','), add))), ',')
 
 function parsevardeclstatement(line, ts, vars, commons, verbosity=0)
     # parse strings like this:
@@ -1231,7 +1249,10 @@ function parsevardeclstatement(line, ts, vars, commons, verbosity=0)
             i += 1
         elseif tt.kind == Tokens.IDENTIFIER
             varname = tt.val
-            varname == "FUNCTION" && break
+            if varname == "FUNCTION"
+                decltype0 = addtostringlist(decltype0, "FUNCTION")
+                i = length(ts) - 1
+            end
             t = ts[i+=1]
             if t.kind == Tokens.STAR #'*' # CHARACTER S*2
                 any(a->a.val == "CHARACTER", ts[1:startvarsind-1]) || @error "unexpected token '*' in \"$(restore(ts))\""
@@ -1268,7 +1289,7 @@ function parsevardeclstatement(line, ts, vars, commons, verbosity=0)
             end
             k = uppercase(varname)
             if haskey(vars, k)
-                vars[k].decl = join(unique(sort(push!(split(vars[k].decl, ','), decltype))), ',')
+                vars[k].decl = addtostringlist(vars[k].decl, decltype)
                 isempty(vars[k].dim) && (vars[k].dim = dim)
                 isempty(vars[k].val) && (vars[k].val = val)
             else
@@ -1347,7 +1368,7 @@ function parsevardecl90statement(line, ts, vars, verbosity=0)
             end
             k = uppercase(varname)
             if haskey(vars, k)
-                vars[k].decl = join(unique(sort(push!(split(vars[k].decl, ','), decltype))), ',')
+                vars[k].decl = addtostringlist(vars[k].decl, decltype)
                 !isempty(dim) && (vars[k].dim = dim)
                 isempty(vars[k].val) && (vars[k].val = val)
             else
@@ -1447,7 +1468,7 @@ function replacearraysbrackets(code::AbstractString, arrays)
     brackets = r"\[((?>[^\[\]]++|(?0))*)\]" # complementary brackets
 
     # trim line breaks after ':'
-    rx = r":\s*(#=?CMMNT\d{10}=?#?|)\t\r\t\h*"
+    rx = r":\s*(#=CMMNT\d{10}=#|)\t\r\t\h*"
     for m in reverse(collect(eachmatch(brackets, code)))
         if occursin(rx, m.match)
             o = m.offset
@@ -1834,7 +1855,7 @@ function insertabsentreturn(code::AbstractString)
     # find last return if exist. https://regex101.com/r/evx2Lu/13
     # else insert new one
     # Note: make a possessive regex for "ERROR: LoadError: PCRE.exec error: match limit exceeded"
-    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#?=?CMMNT\d{10}=?#?\s*|\s*)++)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#?=?CMMNT\d{10}=?#?\s*|\s*))$"mi
+    rx = r"((?<=\n|\r)\h*\d+\h+|(?<=\n|\r)\h*)(return)((?:\h*#=CMMNT\d{10}=#\s*|\s*)++)(\h*end\h*(?:function|(?:recursive\h+|)subroutine|program|module|block|)(?:\h*#=CMMNT\d{10}=#\s*|\s*))$"mi
     if (m = match(rx, code)) !== nothing
         code = replace(code, rx => SS("\\1$(mask("lastreturn"))\\3\\4"))
     elseif occursin(r"\bend[\h\r\n]*$"mi, code)
@@ -2046,7 +2067,10 @@ function commentoutdeclarations(code, commentstrings)
         end
     end
 
-    return savecomments(code, commentstrings, identity)
+    #write("test1.jl", code)
+    code, commentstrings = savecomments(code, commentstrings)
+    #write("test2.jl", code)
+    return code, commentstrings
 end
 
 function processdostatements(code::AbstractString)
@@ -2129,7 +2153,7 @@ function parsedostatement(line)
             end
         elseif ttype == 'l'
                 lex, pos1 = taketoken(line, pos)
-                occursin(r"#?=?CMMNT\d{10}=?#?", lex) && break
+                occursin(r"#=CMMNT\d{10}=#", lex) && break
                 pos = pos1
         else
             pos = skiptoken(line, pos)
@@ -2703,7 +2727,7 @@ function processlinescontinuation(code::AbstractString)
     # fix absent tabs
     code = replace(code, r"\t?(\n|\r)\t|\t(\n|\r)\t?" => SS("\t\r\t"))
     # move arithmetic operator from start of continuator to tail of previous line
-    rx = r"(\h*)(#?=?CMMNT\d{10}=?#?|)\t\r\t(\h*|)(\/\/|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)"
+    rx = r"(\h*)(#=CMMNT\d{10}=#|)\t\r\t(\h*|)(\/\/|[+*\/,=(-]|==|<=|>=|!=|<|>|&&|\|\|)"
     code = replace(code, rx => SS("\\4\\1\\2\t\r\t\\3"))
     return code
 end
@@ -2747,14 +2771,14 @@ end
 
 function concatlines(line1, line2)
     # comments will be stripped
-    return replace(line1, r"^(.*)(?:#?=?CMMNT\d{10}=?#?|)\t?$"m => s"\1") *
+    return replace(line1, r"^(.*)(?:#=CMMNT\d{10}=#|)\t?$"m => s"\1") *
            replace(line2, r"^\t?(.*)$"m => s"\1")
 end
 
 
 function splitoncomment(code)
-    rx = r"(?:#?=?CMMNT\d{10}=?#?)"
-    #rx = r"(?=#?=?CMMNT\d{10}=?#?)"
+    rx = r"(?:#=CMMNT\d{10}=#)"
+    #rx = r"(?=#=CMMNT\d{10}=#)"
     #rx = r"\h*#.*$"
     lines = splitonlines(code)
     comments  = ["" for i=axes(lines,1)]
@@ -2767,8 +2791,8 @@ function splitoncomment(code)
     return lines, comments
 end
 
-stripcomments(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?=?CMMNT\d{10}=?#?"m => "")
-stripcommentsbutlast(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#?=?CMMNT\d{10}=?#?(?!\t?$)"m => "")
+stripcomments(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#=CMMNT\d{10}=#"m => "")
+stripcommentsbutlast(code::AbstractString) = replace(code, r"(?<=[ ])[ ]*#=CMMNT\d{10}=#(?!\t?$)"m => "")
 
 tostring(code::AbstractVector) =
     replace(foldl((a,b) -> a*'\n'*b, code),
@@ -2779,10 +2803,10 @@ splitonlines(code::AbstractVector) = deepcopy(code)
 splitonlines(code) = split(code, r"\n|\r")
 splitonfulllines(code) = split(code, r"\n")
 
-sameasarg(like::AbstractString, code::AbstractString)  = code
-sameasarg(like::AbstractVector, lines::AbstractVector) = lines
-sameasarg(like::AbstractVector, code::AbstractString)  = splitonlines(code)
-sameasarg(like::AbstractString, lines::AbstractVector) = tostring(lines)
+sameasarg(::AbstractString, code::AbstractString)  = code
+sameasarg(::AbstractVector, lines::AbstractVector) = lines
+sameasarg(::AbstractVector, code::AbstractString)  = splitonlines(code)
+sameasarg(::AbstractString, lines::AbstractVector) = tostring(lines)
 
 
 const repairreplacements = OrderedDict(
@@ -2846,23 +2870,19 @@ const repairreplacements = OrderedDict(
 const FPreplacements = OrderedDict(
     # fix floating point numbers with exponent
     # spaces in numbers into underscores "1 000 E3" => "1_000E3"
-    r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1@\2",  # '@' will be restored later
-    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][+-]?\d+)?\b)"m   => s"\1@\2",
-    r"(?<!\*)(\b\d+)[ ]+([eEdD][+-]?\d+\b)"m           => s"\1\2",
-    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([+-]?\d+))?\b)"m   => s"\1@\3f\4",
-    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([+-]?\d+))?\b)"m   => s"\1@\3e\4",
-    #r"(\b\d+)[ ]+((\d+)(?:([eEdD])([+-]?\d+))?\b)"m   => s"\1@\3E\4",
-    #r"(\b\d+)[ ]+[eEdD]([+-]?\d+\b)"m           => s"\1f\2",
-    #r"(\b\d+)[ ]+[eEdD]([+-]?\d+\b)"m           => s"\1e\2",
-    #r"(\b\d+)[ ]+[eEdD]([+-]?\d+\b)"m           => s"\1E\2",
+    r"(?<![\*\w])(\b\d+)[ ]+(\d+\b)"m                      => s"\1⊙\2",  # '⊙' will be restored later
+    r"(?<![\*\w])(\b\d+)[ ]+(\d+(?:[eEdD][+-]?\d+)?\b)"m   => s"\1⊙\2",
+    r"(?<![\*\w])(\b\d+)[ ]+([eEdD][+-]?\d+\b)"m           => s"\1\2",
     # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
     r"(\d)\.([/*+_-])"               => s"\1.0\2",
     # 1.D0 https://regex101.com/r/RRHEyN/4
     r"([+-]?[0-9]+)\.([eEdD][+-]?[0-9]+)"      => s"\1.0\2",
     # custom precision floats: "1.0e+3_MY_SUPER_PRECISION" => "MY_SUPER_PRECISION(1.0e+3)"
     r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
-    #r"([+-]?[0-9]*\.?[0-9]+(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
-    r"(\d)@(\d)"                                           => s"\1_\2",
+    #  something wrong with regxex #r"(?<!\w)((?:[+-]|)[0-9]+)_(\w+)"m => s"\1\3(\2)",
+    #  something wrong with regxex #r"(?<!\w)((?:[+-]|)[0-9]+\.[0-9]+)_(\w+)"m => s"\2(\1)",
+    #  something wrong with regxex #r"(?<!\w)((?:[+-]|)[0-9]+\.[0-9]+(?:[fFeE][+-]?[0-9]+))_(\w+)"m => s"\2(\1)",
+    r"(\d)⊙(\d)"                                           => s"\1_\2",
     # https://regex101.com/r/RRHEyN/2
     r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([+-]?[0-9]+))"m => s"\1f\2",
     r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([+-]?[0-9]+))"m => s"\1e\2",
@@ -2873,8 +2893,8 @@ const FPreplacements = OrderedDict(
 const FP64replacements = OrderedDict(
     # fix floating point numbers with exponent
     # spaces in numbers into underscores "1 000 E3" => "1_000E3"
-    r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1@\2",  # '@' will be restored later
-    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][+-]?\d+)?\b)"m   => s"\1@\2",
+    r"(?<!\*)(\b\d+)[ ]+(\d+\b)"m                      => s"\1⊙\2",  # '⊙' will be restored later
+    r"(?<!\*)(\b\d+)[ ]+(\d+(?:[eEdD][+-]?\d+)?\b)"m   => s"\1⊙\2",
     r"(?<!\*)(\b\d+)[ ]+([eEdD][+-]?\d+\b)"m           => s"\1\2",
     # fix inclomplete floating point numbers: "1./VAR" => "1.0/VAR"
     r"(\d)\.([/*+-_])"               => s"\1.0\2",
@@ -2883,7 +2903,7 @@ const FP64replacements = OrderedDict(
     # custom precision floats: "1.0e+3_MY_SUPER_PRECISION" => "MY_SUPER_PRECISION(1.0e+3)"
     r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*)(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
     #r"([+-]?[0-9]*\.?[0-9]+(?:[fFeE][+-]?[0-9]+)?)_(\w+)"m => s"\2(\1)",
-    r"(\d)@(\d)"                                           => s"\1_\2",
+    r"(\d)⊙(\d)"                                           => s"\1_\2",
     # https://regex101.com/r/RRHEyN/2
     #r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[eE]([+-]?[0-9]+))"m => s"\1e\2",
     r"([+-]?(?:[0-9]*\.?[0-9]+|[0-9]+\.?[0-9]*))(?:[d]([+-]?[0-9]+))"m => s"\1e\2",
@@ -3000,59 +3020,71 @@ const greeksreplacements = OrderedDict(
 
 const trivialreplacements = OrderedDict(
     #r"(\bif\b|\belseif\b|\bend\b|\bdo\b|\bwhile\b)"i => s"\L\1",
-    r"(\bif\b)"i     => s"if"     ,
-    r"(\belseif\b)"i => s"elseif" ,
-    r"(\bend\b)"i    => s"end"    ,
-    r"(\bdo\b)"i     => s"do"     ,
-    r"(\bwhile\b)"i  => s"while"  ,
+    r"(\bIF\b)"i     => s"if"     ,
+    r"(\bELSEIF\b)"i => s"elseif" ,
+    r"(\bEND\b)"i    => s"end"    ,
+    r"(\bDO\b)"i     => s"do"     ,
+    r"(\bWHILE\b)"i  => s"while"  ,
     # Some specific functions
     # https://gcc.gnu.org/onlinedocs/gcc-9.2.0/gfortran/Intrinsic-Procedures.html
     # https://docs.oracle.com/cd/E19957-01/805-4939/6j4m0vnc8/index.html
-    r"\bmod\b\h*\("i       => s"mod("       ,
-    r"\bd?sqrt\b\h*\("i    => s"sqrt("      ,
-    r"\bd?exp\b\h*\("i     => s"exp("       ,
-    r"\bd?log\b\h*\("i     => s"log("       ,
-    r"\bd?log10\b\h*\("i   => s"log10("     ,
-    r"\bd?conjg\b\h*\("i   => s"conj("      ,
-    r"\b[da]?imag\b\h*\("i => s"imag("      ,
-    r"\bd?sign\b\("i       => "copysign("   ,
-    r"\bd?max1?\b\h*\("i   => "max("        ,
-    r"\bd?min1?\b\h*\("i   => "min("        ,
-    r"\bd?abs\b\h*\("i     => "abs("        ,
-    r"\bd?sin\b\h*\("i     => "sin("        ,
-    r"\bd?asin\b\h*\("i    => "asin("       ,
-    r"\bd?cos\b\h*\("i     => "cos("        ,
-    r"\bd?acos\b\h*\("i    => "acos("       ,
-    r"\bd?tan\b\h*\("i     => "tan("        ,
-    r"\bd?atan2?\b\h*\("i  => "atan("       ,
-    r"\b(i[dq])?nint\b\h*\("i => "round(Int, ",
-    r"\bint\b\h*\("i       => "trunc(Int, " ,
-    r"\breal\b\h*\("i      => "Float32("    , # ?
-    r"\bfloat\b\h*\("i     => "Float32("    , # ?
-    r"\bsngl\b\h*\("i      => "Float32("    , # ?
-    r"\bdble\b\h*\("i      => "float("      ,
-    r"\bdfloat\b\h*\("i    => "float("      ,
-    r"\bcmplx\b\h*\("i     => "ComplexF32(" , # ?
-    r"\bdcmplx\b\h*\("i    => "complex("    ,
-    r"\bceiling\b\h*\("i   => "ceil(Int, "  ,
-    r"\bkind\b\h*\("i      => "sizeof("     ,
-    r"\brand\b\h*\(\)"i    => "rand()"      ,
+    r"\bMOD\b\h*\("i       => s"mod("       ,
+    r"\bD?SQRT\b\h*\("i    => s"sqrt("      ,
+    r"\bD?EXP\b\h*\("i     => s"exp("       ,
+    r"\bD?LOG\b\h*\("i     => s"log("       ,
+    r"\bD?LOG10\b\h*\("i   => s"log10("     ,
+    r"\bD?CONJG\b\h*\("i   => s"conj("      ,
+    r"\b[DA]?IMAG\b\h*\("i => s"imag("      ,
+    r"\bD?SIGN\b\("i       => "copysign("   ,
+    r"\bD?MAX1?\b\h*\("i   => "max("        ,
+    r"\bD?MIN1?\b\h*\("i   => "min("        ,
+    r"\bD?ABS\b\h*\("i     => "abs("        ,
+    r"\bD?SIN\b\h*\("i     => "sin("        ,
+    r"\bD?ASIN\b\h*\("i    => "asin("       ,
+    r"\bD?COS\b\h*\("i     => "cos("        ,
+    r"\bD?ACOS\b\h*\("i    => "acos("       ,
+    r"\bD?TAN\b\h*\("i     => "tan("        ,
+    r"\bD?ATAN2?\b\h*\("i  => "atan("       ,
+    r"\b(I[DQ])?NINT\b\h*\("i => "round(Int, ",
+    r"\bINT\b\h*\("i       => "trunc(Int, " ,
+    r"\bREAL\b\h*\("i      => "Float32("    , # ?
+    r"\bFLOAT\b\h*\("i     => "Float32("    , # ?
+    r"\bSNGL\b\h*\("i      => "Float32("    , # ?
+    r"\bDBLE\b\h*\("i      => "float("      ,
+    r"\bDFLOAT\b\h*\("i    => "float("      ,
+    r"\bCMPLX\b\h*\("i     => "ComplexF32(" , # ?
+    r"\bDCMPLX\b\h*\("i    => "complex("    ,
+    r"\bCEILING\b\h*\("i   => "ceil(Int, "  ,
+    r"\bKIND\b\h*\("i      => "sizeof("     ,
+    r"\bRAND\b\h*\(\)"i    => "rand()"      ,
     # https://regex101.com/r/whrGry/2
     #r"(?:\brand\b\h*)(\(((?>[^()\n]+|(?1))+)\))"i => s"rand(MersenneTwister(round(Int,\2)))",
-    r"\blen\b\h*\("i       => "length(",
+    r"\bLEN\b\h*\("i       => "length(",
     # https://regex101.com/r/whrGry/1
-    r"(?:\blen_trim\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
-    r"(?:\blnblnk\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
+    r"(?:\bLEN_TRIM\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
+    r"(?:\bLNBLNK\b\h*)(\(((?>[^()]++|(?1))*)\))"i => s"length(rstrip(\2))",
     # TODO: index, scan, verify, fdate, ctime
-    r"\bi?char\b\h*\("i  => "Char("    ,
-    r"\brepeat\b\h*\("i  => "repeat("  ,
-    r"\badjustr\b\h*\("i => "ADJUSTR(" ,
-    r"\badjustl\b\h*\("i => "ADJUSTL(" ,
+    r"\bICHAR\b\h*\("i   => "Int("    ,
+    r"\bCHAR\b\h*\("i    => "Char("    ,
+    r"\bREPEAT\b\h*\("i  => "repeat("  ,
+    r"\bADJUSTR\b\h*\("i => "ADJUSTR(" ,
+    r"\bADJUSTL\b\h*\("i => "ADJUSTL(" ,
     # TODO: reshape, shape, lbound, ubound
-    r"\bbackspace\b\h+(\w+)"i  => s"seek(\1, position(\1)-1) # BACKSPACE \1",
-    r"\brewind\b\h+(\w+)"i     => s"seek(\1, 0) # REWIND \1",
-    r"\bend\h*file\b\h+(\w+)"i => s"seekend(\1) # ENDFILE \1",
-    # TODO: allocate, NULLIFY, ASSOCIATED
+    r"\bBACKSPACE\b\h+(\w+)"i  => s"seek(\1, position(\1)-1) #= BACKSPACE \1 =#",
+    r"\bREWIND\b\h+(\w+)"i     => s"seek(\1, 0) #= REWIND \1 =#",
+    r"\bEND\h*file\b\h+(\w+)"i => s"seekend(\1) #= ENDFILE \1 =#",
+    # TODO: ALLOCATE, NULLIFY, ASSOCIATED
+    r"\bASSOCIATED\b\h*\(\h*(\w+)\h*,\h*(\w+)\h*\)"i                 =>
+        s"@isdefined(\1) && \1 === \2 #= ASSOCIATED(\1, \2) =#",
+    r"\bASSOCIATED\b\h*\(\h*(\w+)\h*\)"i                             =>
+        s"@isdefined(\1) && !===(\1, nothing) #= ASSOCIATED(\1) =#",
+    r"\bNULLIFY\b\h*\(\h*(\w+)\h*,\h*(\w+)\h*,\h*(\w+)\h*\)"i        =>
+        s"\1 = nothing; \2 = nothing; \3 = nothing #= NULLIFY(...) =#",
+    r"\bNULLIFY\b\h*\(\h*(\w+)\h*,\h*(\w+)\h*\)"i                    =>
+        s"\1 = nothing; \2 = nothing #= NULLIFY(\1, \2) =#",
+    r"\bNULLIFY\b\h*\(\h*(\w+)\h*\)"i                                =>
+        s"\1 = nothing #= NULLIFY(\1) =#",
+
     # see also "fortran.vim" for other Intrinsic and Keywords
 
     # TODO: to complete
@@ -3074,13 +3106,15 @@ const trivialreplacements = OrderedDict(
 
 # Main syntax replacements. Order matters here.
 const replacements = OrderedDict(
+    # ponter => pointed
+    r"=>" => "=",
     # constant arrays
     r"\(/" => s"[",
     r"/\)" => s"]",
     # Space after commas in expressions
-    r"(,)([^\s,\[\]\(\)]+\])" => s"@\2",
+    r"(,)([^\s,\[\]\(\)]+\])" => s"⊙\2",
     r"(,)(\S)" => s"\1 \2",
-    r"@(?!LABEL)" => ",",
+    r"⊙(?!LABEL)" => ",",
     # Replace "return\nend" => "return nothing\nend"
     r"(\h*)\bRETURN\b(\h+end|)$"i => s"\1return nothing\2",
     # include ESCAPEDSTR
