@@ -90,7 +90,7 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 =#
 
 
-module FortranTransplier
+module FortranTranspiler
 
 export convert_fortran
 
@@ -112,7 +112,7 @@ module CLI
 
 #Base.Experimental.@optlevel 0
 
-using ..FortranTransplier
+using ..FortranTranspiler
 using Compat
 using DataStructures
 using Glob
@@ -3641,6 +3641,6 @@ function casedsavekeywords(code::AbstractString, casetransform=identity)
 end
 
 
-end # of module FortranTransplier
+end # of module FortranTranspiler
 
-isinteractive() || FortranTransplier.CLI.main(ARGS)
+isinteractive() || FortranTranspiler.CLI.main(ARGS)
