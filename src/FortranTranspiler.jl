@@ -1,8 +1,6 @@
-#!/bin/bash
-#=
-exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
-    "${BASH_SOURCE[0]}" "$@"
-=#
+#!/usr/bin/env -S julia --color=yes --startup-file=no
+
+module FortranTranspiler
 
 #=
 
@@ -90,7 +88,6 @@ exec julia --color=yes --startup-file=no -e 'include(popfirst!(ARGS))' \
 =#
 
 
-module FortranTranspiler
 
 export convert_fortran
 
